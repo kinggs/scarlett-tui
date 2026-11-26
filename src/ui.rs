@@ -1,9 +1,10 @@
 use crate::alsa_ctl::{
     AlsaCard, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
 };
-use crate::model::{RouteGroup, ScarlettModel, meter_to_dbfs};
+use crate::model::{RouteGroup, ScarlettModel, meter_to_dbfs_with_max};
 use crate::pipewire::{self, PwLink};
 use crossterm::{
+    cursor::Show,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -18,6 +19,7 @@ use ratatui::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
     },
 };
+use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -58,14 +60,29 @@ struct IoItem {
 
 struct RoutePicker {
     numid: u32,
+    card_index: u32,
+    generation: u64,
     title: String,
     items: Vec<String>,
     selected: usize,
 }
 
+/// RAII guard that restores raw mode, alternate screen, and cursor even on panic.
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, LeaveAlternateScreen, Show);
+    }
+}
+
 pub struct App {
     cards: Vec<CardEntry>,
-    card_pos: usize,
+    card_override: Option<u32>,
+    current_card_index: Option<u32>,
+    generation: u64,
     alsa: Option<AlsaCard>,
     model: Option<ScarlettModel>,
     tab: Tab,
@@ -75,12 +92,13 @@ pub struct App {
     meter_peak: Vec<f64>,
     meter_peak_time: Vec<Instant>,
 
-    // Per-tab cursors
+    // Per-tab cursors & remembered matrix levels for safe unmute
     io_cursor: usize,
     route_cursor: usize,
     route_picker: Option<RoutePicker>,
     matrix_row: usize,
     matrix_col: usize,
+    matrix_prev_levels: HashMap<(char, u32), i64>,
     pw_links: Vec<PwLink>,
     pw_show_all: bool,
     pw_cursor: usize,
@@ -88,18 +106,22 @@ pub struct App {
     status_msg: String,
     status_at: Instant,
     last_rate_check: Instant,
+    last_poll_fallback: Instant,
     should_quit: bool,
 }
 
 impl App {
     fn new(card_override: Option<u32>) -> Self {
         let cards = discover_focusrite_cards();
-        let card_pos = card_override
-            .and_then(|idx| cards.iter().position(|c| c.index == idx))
-            .unwrap_or(0);
+        let current_card_index = match card_override {
+            Some(idx) => cards.iter().find(|c| c.index == idx).map(|c| c.index),
+            None => cards.first().map(|c| c.index),
+        };
         let mut app = Self {
             cards,
-            card_pos,
+            card_override,
+            current_card_index,
+            generation: 0,
             alsa: None,
             model: None,
             tab: Tab::Overview,
@@ -111,12 +133,14 @@ impl App {
             route_picker: None,
             matrix_row: 0,
             matrix_col: 0,
+            matrix_prev_levels: HashMap::new(),
             pw_links: Vec::new(),
             pw_show_all: false,
             pw_cursor: 0,
             status_msg: String::new(),
             status_at: Instant::now(),
             last_rate_check: Instant::now(),
+            last_poll_fallback: Instant::now(),
             should_quit: false,
         };
         app.connect_current();
@@ -129,17 +153,84 @@ impl App {
         self.status_at = Instant::now();
     }
 
+    /// Clamp every cursor and invalidate any open modal after a model change so
+    /// switching to a smaller interface can never index out of bounds.
+    fn clamp_cursors(&mut self) {
+        self.route_picker = None;
+        let io_len = self.io_items().len();
+        self.io_cursor = if io_len == 0 {
+            0
+        } else {
+            self.io_cursor.min(io_len - 1)
+        };
+        if let Some(ref m) = self.model {
+            self.route_cursor = if m.routes.is_empty() {
+                0
+            } else {
+                self.route_cursor.min(m.routes.len() - 1)
+            };
+            self.matrix_row = if m.matrix.inputs.is_empty() {
+                0
+            } else {
+                self.matrix_row.min(m.matrix.inputs.len() - 1)
+            };
+            self.matrix_col = if m.matrix.mixes.is_empty() {
+                0
+            } else {
+                self.matrix_col.min(m.matrix.mixes.len() - 1)
+            };
+        } else {
+            self.route_cursor = 0;
+            self.matrix_row = 0;
+            self.matrix_col = 0;
+        }
+        let pw_len = self.visible_pw_links().len();
+        self.pw_cursor = if pw_len == 0 {
+            0
+        } else {
+            self.pw_cursor.min(pw_len - 1)
+        };
+    }
+
     fn connect_current(&mut self) {
         self.alsa = None;
         self.model = None;
+        self.route_picker = None;
+        self.matrix_prev_levels.clear();
         self.meter_raw.clear();
         self.meter_peak.clear();
         self.meter_peak_time.clear();
+        self.generation = self.generation.wrapping_add(1);
 
-        let Some(entry) = self.cards.get(self.card_pos).cloned() else {
-            self.set_status("No Focusrite Scarlett USB interface found");
+        let entry = self
+            .current_card_index
+            .and_then(|idx| self.cards.iter().find(|c| c.index == idx))
+            .cloned();
+
+        let Some(entry) = entry else {
+            if let Some(req) = self.card_override {
+                if self.cards.is_empty() {
+                    self.set_status(format!(
+                        "Requested card {req} not found (no Focusrite USB interfaces detected)"
+                    ));
+                } else {
+                    let avail: Vec<String> = self
+                        .cards
+                        .iter()
+                        .map(|c| format!("{} ({})", c.index, c.name))
+                        .collect();
+                    self.set_status(format!(
+                        "Requested card {req} not found (available: {})",
+                        avail.join(", ")
+                    ));
+                }
+            } else {
+                self.set_status("No Focusrite Scarlett USB interface found");
+            }
+            self.clamp_cursors();
             return;
         };
+
         match AlsaCard::open(entry.index) {
             Ok(alsa) => match alsa.enumerate() {
                 Ok(ctrls) => {
@@ -149,32 +240,53 @@ impl App {
                     self.meter_raw = vec![0; n];
                     self.meter_peak = vec![-96.0; n];
                     self.meter_peak_time = vec![Instant::now(); n];
+                    if !alsa.events_subscribed {
+                        self.set_status("ALSA event subscription unavailable; polling every 2s");
+                    } else if !model.has_mixer_controls() {
+                        self.set_status(
+                            "Card opened, but mixer controls are unavailable (for Gen 4 16i16/18i16/18i20, check fcp-server)",
+                        );
+                    }
                     self.alsa = Some(alsa);
                     self.model = Some(model);
+                    self.clamp_cursors();
                 }
-                Err(e) => self.set_status(format!("ALSA enumerate error: {e}")),
+                Err(e) => {
+                    self.set_status(format!("ALSA enumerate error: {e}"));
+                    self.clamp_cursors();
+                }
             },
-            Err(e) => self.set_status(format!("ALSA open error: {e}")),
+            Err(e) => {
+                self.set_status(format!("ALSA open error: {e}"));
+                self.clamp_cursors();
+            }
         }
     }
 
     fn refresh_all(&mut self) {
         self.cards = discover_focusrite_cards();
-        if self.card_pos >= self.cards.len() {
-            self.card_pos = 0;
-        }
+        self.current_card_index = match self.card_override {
+            Some(req) => self.cards.iter().find(|c| c.index == req).map(|c| c.index),
+            None => self
+                .current_card_index
+                .filter(|idx| self.cards.iter().any(|c| c.index == *idx))
+                .or_else(|| self.cards.first().map(|c| c.index)),
+        };
         self.connect_current();
         self.refresh_pipewire();
-        self.set_status("Refreshed ALSA & PipeWire state");
+        if self.model.is_some() {
+            self.set_status("Refreshed ALSA & PipeWire state");
+        }
     }
 
     fn refresh_pipewire(&mut self) {
-        match pipewire::list_links() {
+        let card = self.model.as_ref().map(|m| &m.card);
+        match pipewire::list_links_for_card(card) {
             Ok(links) => {
                 self.pw_links = links;
                 let count = self.visible_pw_links().len();
-                if self.pw_cursor >= count && count > 0 {
-                    self.pw_cursor = count - 1;
+                if self.pw_cursor >= count {
+                    self.pw_cursor = count.saturating_sub(1);
                 }
             }
             Err(e) => self.set_status(format!("pw-link: {e}")),
@@ -226,6 +338,13 @@ impl App {
                 items.push(IoItem {
                     section: "Inputs",
                     label: format!("{} Clip Safe", inp.label),
+                    numid: id,
+                });
+            }
+            if let Some(id) = inp.autogain_numid {
+                items.push(IoItem {
+                    section: "Inputs",
+                    label: format!("{} Autogain", inp.label),
                     numid: id,
                 });
             }
@@ -283,62 +402,117 @@ impl App {
         items
     }
 
-    fn write_control(&mut self, numid: u32, new_val: i64) {
-        let Some(ref alsa) = self.alsa else { return };
+    fn write_control(&mut self, numid: u32, new_val: i64) -> bool {
+        let Some(ref alsa) = self.alsa else {
+            return false;
+        };
         let Some(ref mut model) = self.model else {
-            return;
+            return false;
         };
         let Some(ctrl) = model.controls.get(&numid).cloned() else {
-            return;
+            self.set_status(format!("Control #{numid} not found"));
+            return false;
         };
-        match alsa.write_single(&ctrl, new_val) {
-            Ok(()) => {
-                if let Ok(vals) = alsa.read_values(numid, ctrl.kind, ctrl.count)
-                    && let Some(c) = model.controls.get_mut(&numid)
-                {
-                    c.values = vals;
-                }
-                model.recompute_derived();
-            }
-            Err(e) => self.set_status(format!("Write failed: {e}")),
+        if let Err(e) = alsa.write_single(&ctrl, new_val) {
+            self.set_status(format!("Write failed: {e}"));
+            return false;
         }
+        let readback = match model.controls.get_mut(&numid) {
+            Some(c) => alsa.refresh_control_value(c),
+            None => Err(format!("Control #{numid} disappeared")),
+        };
+        if let Err(e) = readback {
+            self.set_status(format!("Readback failed: {e}"));
+            return false;
+        }
+        model.recompute_derived();
+        true
     }
 
     fn tick(&mut self) {
-        // Drain hardware events (physical button presses / alsa-scarlett-gui / plugin changes)
+        // Drain hardware events (physical button presses / plugin changes / access changes)
         let mut disconnected = false;
+        let mut structural_rebuild = false;
         if let (Some(alsa), Some(model)) = (&self.alsa, &mut self.model) {
             if !alsa.exists() {
                 disconnected = true;
-            } else if let Ok((changed, structural)) = alsa.drain_events() {
-                let mid = model.meter_numid;
-                let non_meter: Vec<u32> =
-                    changed.into_iter().filter(|&id| Some(id) != mid).collect();
-                if structural {
-                    if let Ok(ctrls) = alsa.enumerate() {
-                        let stream = read_stream_rate(model.card.index);
-                        *model = ScarlettModel::build(model.card.clone(), stream, ctrls);
-                    }
-                } else if !non_meter.is_empty() {
-                    for id in non_meter {
-                        if let Some(c) = model.controls.get_mut(&id)
-                            && let Ok(vals) = alsa.read_values(id, c.kind, c.count)
-                        {
-                            c.values = vals;
+            } else {
+                match alsa.drain_events() {
+                    Ok(events) => {
+                        let mid = model.meter_numid;
+                        if events.structural {
+                            if let Ok(ctrls) = alsa.enumerate() {
+                                let stream = read_stream_rate(model.card.index);
+                                *model = ScarlettModel::build(model.card.clone(), stream, ctrls);
+                                structural_rebuild = true;
+                            }
+                        } else {
+                            let mut dirty = false;
+                            for id in events.meta_changed {
+                                if Some(id) == mid {
+                                    continue;
+                                }
+                                if let Some(updated) = alsa.describe_and_read(id) {
+                                    model.controls.insert(id, updated);
+                                    dirty = true;
+                                }
+                            }
+                            for id in events.value_changed {
+                                if Some(id) == mid {
+                                    continue;
+                                }
+                                if let Some(c) = model.controls.get_mut(&id) {
+                                    let _ = alsa.refresh_control_value(c);
+                                    dirty = true;
+                                }
+                            }
+                            if dirty {
+                                model.recompute_derived();
+                            }
                         }
                     }
-                    model.recompute_derived();
+                    Err(_) => {
+                        disconnected = true;
+                    }
                 }
             }
         }
+
         if disconnected {
             self.alsa = None;
             self.model = None;
+            self.generation = self.generation.wrapping_add(1);
+            self.clamp_cursors();
             self.set_status("Scarlett disconnected — press r to rescan");
             return;
         }
+        if structural_rebuild {
+            self.generation = self.generation.wrapping_add(1);
+            self.clamp_cursors();
+        }
 
-        // Poll live 12-bit hardware meters on Overview tab
+        // Polling fallback when event subscription failed or waiting for FCP mixer controls.
+        if let (Some(alsa), Some(model)) = (&self.alsa, &mut self.model)
+            && (!alsa.events_subscribed || !model.has_mixer_controls())
+            && self.last_poll_fallback.elapsed() >= Duration::from_secs(2)
+        {
+            self.last_poll_fallback = Instant::now();
+            if let Ok(ctrls) = alsa.enumerate() {
+                let prev_len = model.controls.len();
+                let prev_avail = model.has_mixer_controls();
+                let stream = read_stream_rate(model.card.index);
+                let new_model = ScarlettModel::build(model.card.clone(), stream, ctrls);
+                let rebuilt = new_model.controls.len() != prev_len
+                    || new_model.has_mixer_controls() != prev_avail;
+                *model = new_model;
+                if rebuilt {
+                    self.generation = self.generation.wrapping_add(1);
+                    self.clamp_cursors();
+                }
+            }
+        }
+
+        // Poll live hardware meters on Overview tab
         if self.tab == Tab::Overview
             && let (Some(alsa), Some(model)) = (&self.alsa, &self.model)
             && let Some(mid) = model.meter_numid
@@ -351,7 +525,7 @@ impl App {
                 self.meter_peak_time = vec![now; raw.len()];
             }
             for (i, &v) in raw.iter().enumerate() {
-                let db = meter_to_dbfs(v);
+                let db = meter_to_dbfs_with_max(v, model.meter_max);
                 if db >= self.meter_peak[i]
                     || now.duration_since(self.meter_peak_time[i]) > Duration::from_millis(1200)
                 {
@@ -392,6 +566,15 @@ impl App {
                     self.route_picker = Some(picker);
                 }
                 KeyCode::Enter | KeyCode::Char(' ') => {
+                    let valid_gen = picker.generation == self.generation
+                        && self
+                            .model
+                            .as_ref()
+                            .is_some_and(|m| m.card.index == picker.card_index);
+                    if !valid_gen {
+                        self.set_status("Route selection expired after device update");
+                        return;
+                    }
                     let numid = picker.numid;
                     let sel = picker.selected as i64;
                     let label = picker
@@ -400,8 +583,9 @@ impl App {
                         .cloned()
                         .unwrap_or_default();
                     let title = picker.title.clone();
-                    self.write_control(numid, sel);
-                    self.set_status(format!("{title} → {label}"));
+                    if self.write_control(numid, sel) {
+                        self.set_status(format!("{title} → {label}"));
+                    }
                 }
                 _ => {
                     self.route_picker = Some(picker);
@@ -456,9 +640,15 @@ impl App {
                 self.refresh_all();
                 return;
             }
-            KeyCode::Char('c') if self.cards.len() > 1 => {
-                self.card_pos = (self.card_pos + 1) % self.cards.len();
+            KeyCode::Char('c') if self.cards.len() > 1 && self.card_override.is_none() => {
+                let cur_pos = self
+                    .current_card_index
+                    .and_then(|idx| self.cards.iter().position(|c| c.index == idx))
+                    .unwrap_or(0);
+                let next_pos = (cur_pos + 1) % self.cards.len();
+                self.current_card_index = Some(self.cards[next_pos].index);
                 self.connect_current();
+                self.refresh_pipewire();
                 if let Some(ref m) = self.model {
                     self.set_status(format!("Switched to {}", m.card.name));
                 }
@@ -503,58 +693,103 @@ impl App {
                     self.io_cursor += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => match ctrl.kind {
-                ControlKind::Bool => {
-                    self.write_control(ctrl.numid, if ctrl.bool_val() { 0 } else { 1 })
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
                 }
-                ControlKind::Enum => {
-                    let next = if ctrl.items.is_empty() {
-                        0
-                    } else {
-                        (ctrl.val() + 1) % ctrl.items.len() as i64
-                    };
-                    self.write_control(ctrl.numid, next);
-                }
-                ControlKind::Int => {
-                    let unity = self
-                        .model
-                        .as_ref()
-                        .map(|m| m.unity_raw_for(ctrl.numid))
-                        .unwrap_or(ctrl.max);
-                    self.write_control(ctrl.numid, unity);
-                }
-            },
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('=') => {
                 match ctrl.kind {
-                    ControlKind::Bool => self.write_control(ctrl.numid, 1),
+                    ControlKind::Bool => {
+                        if let Some(b) = ctrl.opt_bool_val() {
+                            self.write_control(ctrl.numid, if b { 0 } else { 1 });
+                        }
+                    }
                     ControlKind::Enum => {
-                        let next = (ctrl.val() + 1).min(ctrl.max);
-                        self.write_control(ctrl.numid, next);
+                        if !ctrl.items.is_empty()
+                            && let Some(cur) = ctrl.opt_val()
+                        {
+                            let next = (cur + 1) % ctrl.items.len() as i64;
+                            self.write_control(ctrl.numid, next);
+                        }
                     }
                     ControlKind::Int => {
-                        let step = ((ctrl.max - ctrl.min) / 64).max(1);
-                        self.write_control(ctrl.numid, (ctrl.val() + step).min(ctrl.max));
+                        // Do not jump integer gain controls on Enter/Space — use h/l or 0.
+                        self.set_status("Use h/l (+/-) to adjust, 0 for 0 dB unity, m for min");
                     }
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => match ctrl.kind {
-                ControlKind::Bool => self.write_control(ctrl.numid, 0),
-                ControlKind::Enum => {
-                    let prev = (ctrl.val() - 1).max(ctrl.min);
-                    self.write_control(ctrl.numid, prev);
+            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('=') => {
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
                 }
-                ControlKind::Int => {
-                    let step = ((ctrl.max - ctrl.min) / 64).max(1);
-                    self.write_control(ctrl.numid, (ctrl.val() - step).max(ctrl.min));
+                match ctrl.kind {
+                    ControlKind::Bool => {
+                        self.write_control(ctrl.numid, 1);
+                    }
+                    ControlKind::Enum => {
+                        if let Some(cur) = ctrl.opt_val() {
+                            self.write_control(ctrl.numid, (cur + 1).min(ctrl.max));
+                        }
+                    }
+                    ControlKind::Int => {
+                        let next = self
+                            .alsa
+                            .as_ref()
+                            .and_then(|a| a.step_db(&ctrl, 1.0))
+                            .or_else(|| {
+                                let cur = ctrl.opt_val()?;
+                                let step = ((ctrl.max - ctrl.min) / 64).max(1);
+                                Some((cur + step).min(ctrl.max))
+                            });
+                        if let Some(v) = next {
+                            self.write_control(ctrl.numid, v);
+                        }
+                    }
                 }
-            },
+            }
+            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => {
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
+                }
+                match ctrl.kind {
+                    ControlKind::Bool => {
+                        self.write_control(ctrl.numid, 0);
+                    }
+                    ControlKind::Enum => {
+                        if let Some(cur) = ctrl.opt_val() {
+                            self.write_control(ctrl.numid, (cur - 1).max(ctrl.min));
+                        }
+                    }
+                    ControlKind::Int => {
+                        let next = self
+                            .alsa
+                            .as_ref()
+                            .and_then(|a| a.step_db(&ctrl, -1.0))
+                            .or_else(|| {
+                                let cur = ctrl.opt_val()?;
+                                let step = ((ctrl.max - ctrl.min) / 64).max(1);
+                                Some((cur - step).max(ctrl.min))
+                            });
+                        if let Some(v) = next {
+                            self.write_control(ctrl.numid, v);
+                        }
+                    }
+                }
+            }
             KeyCode::Char('0') if ctrl.kind == ControlKind::Int => {
-                let unity = self
+                if let Some(unity) = self
                     .model
                     .as_ref()
-                    .map(|m| m.unity_raw_for(ctrl.numid))
-                    .unwrap_or(ctrl.max);
-                self.write_control(ctrl.numid, unity);
+                    .and_then(|m| m.unity_raw_for(ctrl.numid))
+                {
+                    if self.write_control(ctrl.numid, unity) {
+                        self.set_status(format!("{} → 0.0 dB", item.label));
+                    }
+                } else {
+                    self.set_status(format!("No 0 dB reference for {}", item.label));
+                }
             }
             KeyCode::Char('m') if ctrl.kind == ControlKind::Int => {
                 self.write_control(ctrl.numid, ctrl.min);
@@ -574,6 +809,7 @@ impl App {
         let route = &model.routes[self.route_cursor];
         let numid = route.numid;
         let title = route.label.clone();
+        let card_index = model.card.index;
         let Some(ctrl) = model.controls.get(&numid).cloned() else {
             return;
         };
@@ -588,29 +824,45 @@ impl App {
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => {
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
+                }
                 self.route_picker = Some(RoutePicker {
                     numid,
+                    card_index,
+                    generation: self.generation,
                     title,
                     items: ctrl.items.clone(),
                     selected: ctrl.val().max(0) as usize,
                 });
             }
             KeyCode::Right | KeyCode::Char('l') => {
-                if !ctrl.items.is_empty() {
-                    let next = (ctrl.val() + 1) % ctrl.items.len() as i64;
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
+                }
+                if !ctrl.items.is_empty()
+                    && let Some(cur) = ctrl.opt_val()
+                {
+                    let next = (cur + 1) % ctrl.items.len() as i64;
                     self.write_control(numid, next);
                 }
             }
             KeyCode::Left | KeyCode::Char('h') => {
-                if !ctrl.items.is_empty() {
+                if !ctrl.is_editable() {
+                    self.set_status(format!("'{}' is read-only", ctrl.name));
+                    return;
+                }
+                if !ctrl.items.is_empty()
+                    && let Some(cur) = ctrl.opt_val()
+                {
                     let len = ctrl.items.len() as i64;
-                    let prev = (ctrl.val() + len - 1) % len;
+                    let prev = (cur + len - 1) % len;
                     self.write_control(numid, prev);
                 }
             }
-            KeyCode::Char('x') | KeyCode::Char('0') => {
-                // Set to "Off" (index 0)
-                self.write_control(numid, 0);
+            KeyCode::Char('x') | KeyCode::Char('0') if self.write_control(numid, 0) => {
                 self.set_status(format!("{title} → Off"));
             }
             _ => {}
@@ -630,6 +882,8 @@ impl App {
         let mix = model.matrix.mixes[self.matrix_col];
         let input = model.matrix.inputs[self.matrix_row];
         let cell_id = model.matrix.cells.get(&(mix, input)).copied();
+        let cell_ctrl = cell_id.and_then(|id| model.controls.get(&id)).cloned();
+        let unity_opt = cell_id.and_then(|id| model.unity_raw_for(id));
 
         match code {
             KeyCode::Up | KeyCode::Char('k') => self.matrix_row = self.matrix_row.saturating_sub(1),
@@ -647,64 +901,77 @@ impl App {
                 }
             }
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
+                if let Some(ref c) = cell_ctrl
+                    && let Some(v) = self
+                        .alsa
+                        .as_ref()
+                        .and_then(|a| a.step_db(c, 1.0))
+                        .or_else(|| c.opt_val().map(|cur| (cur + 1).min(c.max)))
                 {
-                    let v = (c.val() + 2).min(c.max); // +1.0 dB (0.5 dB steps)
-                    self.write_control(id, v);
+                    self.write_control(c.numid, v);
                 }
             }
             KeyCode::Char('-') | KeyCode::Char('[') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
+                if let Some(ref c) = cell_ctrl
+                    && let Some(v) = self
+                        .alsa
+                        .as_ref()
+                        .and_then(|a| a.step_db(c, -1.0))
+                        .or_else(|| c.opt_val().map(|cur| (cur - 1).max(c.min)))
                 {
-                    let v = (c.val() - 2).max(c.min); // -1.0 dB
-                    self.write_control(id, v);
+                    self.write_control(c.numid, v);
                 }
             }
             KeyCode::Char('}') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
+                if let Some(ref c) = cell_ctrl
+                    && let Some(v) = self
+                        .alsa
+                        .as_ref()
+                        .and_then(|a| a.step_db(c, 6.0))
+                        .or_else(|| c.opt_val().map(|cur| (cur + 6).min(c.max)))
                 {
-                    self.write_control(id, (c.val() + 12).min(c.max)); // +6 dB
+                    self.write_control(c.numid, v);
                 }
             }
             KeyCode::Char('{') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
+                if let Some(ref c) = cell_ctrl
+                    && let Some(v) = self
+                        .alsa
+                        .as_ref()
+                        .and_then(|a| a.step_db(c, -6.0))
+                        .or_else(|| c.opt_val().map(|cur| (cur - 6).max(c.min)))
                 {
-                    self.write_control(id, (c.val() - 12).max(c.min)); // -6 dB
+                    self.write_control(c.numid, v);
                 }
             }
             KeyCode::Char('0') => {
                 if let Some(id) = cell_id {
-                    let unity = model.unity_raw_for(id);
-                    self.write_control(id, unity);
-                    self.set_status(format!("Mix {mix} In {input:02} → 0.0 dB"));
+                    if let Some(unity) = unity_opt {
+                        if self.write_control(id, unity) {
+                            self.set_status(format!("Mix {mix} In {input:02} → 0.0 dB"));
+                        }
+                    } else {
+                        self.set_status(format!("No 0 dB reference for Mix {mix} In {input:02}"));
+                    }
                 }
             }
-            KeyCode::Char('m') | KeyCode::Char('x') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
+            KeyCode::Char('m') | KeyCode::Char('x') | KeyCode::Enter | KeyCode::Char(' ') => {
+                if let Some(ref c) = cell_ctrl
+                    && let Some(cur) = c.opt_val()
                 {
-                    let target = if c.val() > c.min {
-                        c.min
+                    if cur > c.min {
+                        // Save previous level so unmute restores it instead of jumping to 0 dB.
+                        self.matrix_prev_levels.insert((mix, input), cur);
+                        self.write_control(c.numid, c.min);
+                    } else if let Some(prev) = self.matrix_prev_levels.get(&(mix, input)).copied() {
+                        self.write_control(c.numid, prev.clamp(c.min, c.max));
+                    } else if let Some(unity) = unity_opt {
+                        self.write_control(c.numid, unity);
                     } else {
-                        model.unity_raw_for(id)
-                    };
-                    self.write_control(id, target);
-                }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if let Some(id) = cell_id
-                    && let Some(c) = model.controls.get(&id)
-                {
-                    let target = if c.val() > c.min {
-                        c.min
-                    } else {
-                        model.unity_raw_for(id)
-                    };
-                    self.write_control(id, target);
+                        self.set_status(format!(
+                            "No previous level or 0 dB reference for Mix {mix} In {input:02}"
+                        ));
+                    }
                 }
             }
             _ => {}
@@ -785,10 +1052,17 @@ impl App {
                 .active_rate
                 .map(|r| format!("{:.1} kHz", r as f64 / 1000.0))
                 .unwrap_or_else(|| "Idle".into());
-            let sync_color = if m.is_locked() {
+            let sync_color = if !m.has_mixer_controls() {
+                Color::Red
+            } else if m.is_locked() {
                 Color::Green
             } else {
                 Color::Yellow
+            };
+            let sync_label = if !m.has_mixer_controls() && m.sync_status == "Unknown" {
+                "Mixer unavailable".to_string()
+            } else {
+                m.sync_status.clone()
             };
             let fw = m
                 .firmware
@@ -810,7 +1084,7 @@ impl App {
                 ),
                 Span::styled(format!("{fw}  "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("● {}  ", m.sync_status),
+                    format!("● {sync_label}  "),
                     Style::default().fg(sync_color).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{rate_str}  "), Style::default().fg(Color::Cyan)),
@@ -823,6 +1097,11 @@ impl App {
                     }),
                 ),
             ])
+        } else if let Some(req) = self.card_override {
+            Line::from(Span::styled(
+                format!(" Focusrite card {req} not connected (press r to rescan)"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ))
         } else {
             Line::from(Span::styled(
                 " No Focusrite Scarlett connected (press r to rescan)",
@@ -861,6 +1140,23 @@ impl App {
             return;
         };
 
+        if !m.has_mixer_controls() {
+            let p = Paragraph::new(
+                "USB audio device opened, but no Focusrite mixer controls are exposed yet.\n\
+                 - For Scarlett Gen 4 16i16 / 18i16 / 18i20 (FCP), ensure fcp-server is running.\n\
+                 - For kernels older than 6.7, ensure snd_usb_audio device_setup=1 is set.\n\
+                 - Scarlett Gen 1 (mixer_scarlett) is not supported.\n\
+                 Press 'r' to rescan once mixer controls are available.",
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Mixer Unavailable "),
+            );
+            f.render_widget(p, area);
+            return;
+        }
+
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
@@ -889,7 +1185,7 @@ impl App {
             }
 
             let raw = self.meter_raw.get(mc.meter_index).copied().unwrap_or(0);
-            let db = meter_to_dbfs(raw);
+            let db = meter_to_dbfs_with_max(raw, m.meter_max);
             let peak = self
                 .meter_peak
                 .get(mc.meter_index)
@@ -917,7 +1213,12 @@ impl App {
             } else {
                 String::new()
             };
-            let label = truncate(&format!("{} [{}]", mc.label, mc.source), 22);
+            let raw_label = if mc.source.is_empty() {
+                mc.label.clone()
+            } else {
+                format!("{} [{}]", mc.label, mc.source)
+            };
+            let label = truncate(&raw_label, 22);
 
             meter_lines.push(Line::from(vec![
                 Span::raw(format!(" {label:<22} ")),
@@ -938,7 +1239,7 @@ impl App {
         let meter_panel = Paragraph::new(meter_lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Live Hardware Meters (12-bit ALSA) ")
+                .title(" Live Hardware Meters (ALSA) ")
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
         f.render_widget(meter_panel, cols[0]);
@@ -969,7 +1270,7 @@ impl App {
             if let Some(id) = inp.air_numid
                 && let Some(c) = m.controls.get(&id)
             {
-                let on = c.val() > 0;
+                let on = c.opt_val().unwrap_or(0) > 0;
                 let txt = if c.kind == ControlKind::Enum && on {
                     format!("[Air:{}]", c.enum_label())
                 } else {
@@ -997,10 +1298,14 @@ impl App {
             if let Some(id) = inp.gain_numid
                 && let Some(c) = m.controls.get(&id)
             {
-                badges.push(Span::raw(format!(
-                    " {:.0} dB",
-                    c.current_db().unwrap_or(c.val() as f64)
-                )));
+                let gtxt = match c.current_db() {
+                    Some(db) => format!(" {db:.0} dB"),
+                    None => match c.opt_val() {
+                        Some(v) => format!(" {v}"),
+                        None => " ?".into(),
+                    },
+                };
+                badges.push(Span::raw(gtxt));
             }
             let mut spans = vec![Span::raw(format!("  {:<8} ", inp.label))];
             spans.extend(badges);
@@ -1009,20 +1314,18 @@ impl App {
 
         for &pid in &m.phantom_numids {
             if let Some(c) = m.controls.get(&pid) {
-                let on = c.bool_val();
                 let short = c.name.replace(" Capture Switch", "");
+                let (txt, style) = match c.opt_bool_val() {
+                    Some(true) => (
+                        "ON",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ),
+                    Some(false) => ("OFF", Style::default().fg(Color::DarkGray)),
+                    None => ("?", Style::default().fg(Color::Yellow)),
+                };
                 info_lines.push(Line::from(vec![
                     Span::raw(format!("  {short}: ")),
-                    Span::styled(
-                        if on { "ON" } else { "OFF" },
-                        Style::default()
-                            .fg(if on { Color::Red } else { Color::DarkGray })
-                            .add_modifier(if on {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ),
+                    Span::styled(txt, style),
                 ]));
             }
         }
@@ -1112,51 +1415,71 @@ impl App {
     fn render_io(&self, f: &mut Frame, area: Rect) {
         let Some(ref m) = self.model else { return };
         let items = self.io_items();
-        let rows: Vec<Row> = items
+        if items.is_empty() {
+            let p = Paragraph::new("No I/O or device controls exposed.").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" I/O & Device "),
+            );
+            f.render_widget(p, area);
+            return;
+        }
+
+        let cursor = self.io_cursor.min(items.len() - 1);
+        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
+        let row_start = window_start(cursor, items.len(), visible_rows);
+        let row_end = (row_start + visible_rows).min(items.len());
+
+        let rows: Vec<Row> = items[row_start..row_end]
             .iter()
             .enumerate()
-            .map(|(i, item)| {
+            .map(|(local_i, item)| {
+                let i = row_start + local_i;
                 let c = &m.controls[&item.numid];
-                let (val_str, val_color) = match c.kind {
-                    ControlKind::Bool => {
-                        if c.bool_val() {
-                            (
-                                "ON".into(),
-                                if item.label.contains("Phantom") || item.label.contains("Mute") {
-                                    Color::Red
-                                } else {
-                                    Color::Green
-                                },
-                            )
-                        } else {
-                            ("OFF".into(), Color::DarkGray)
-                        }
-                    }
+                let (mut val_str, val_color) = match c.kind {
+                    ControlKind::Bool => match c.opt_bool_val() {
+                        Some(true) => (
+                            "ON".into(),
+                            if item.label.contains("Phantom") || item.label.contains("Mute") {
+                                Color::Red
+                            } else {
+                                Color::Green
+                            },
+                        ),
+                        Some(false) => ("OFF".into(), Color::DarkGray),
+                        None => ("?".into(), Color::Yellow),
+                    },
                     ControlKind::Enum => {
                         let lbl = c.enum_label().to_string();
-                        let col = if c.val() > 0 {
+                        let col = if !c.value_valid || c.val() > 0 {
                             Color::Yellow
                         } else {
                             Color::Reset
                         };
                         (lbl, col)
                     }
-                    ControlKind::Int => {
-                        let frac = if c.max > c.min {
-                            (c.val() - c.min) as f64 / (c.max - c.min) as f64
-                        } else {
-                            0.0
-                        };
-                        let bars = (frac * 18.0).round() as usize;
-                        let meter = format!("{}{}", "█".repeat(bars), "░".repeat(18 - bars));
-                        let txt = c
-                            .current_db()
-                            .map(|db| format!("{meter} {db:+6.1} dB"))
-                            .unwrap_or_else(|| format!("{meter} {}", c.val()));
-                        (txt, Color::Cyan)
-                    }
+                    ControlKind::Int => match c.opt_val() {
+                        Some(v) => {
+                            let frac = if c.max > c.min {
+                                ((v - c.min) as f64 / (c.max - c.min) as f64).clamp(0.0, 1.0)
+                            } else {
+                                0.0
+                            };
+                            let bars = (frac * 18.0).round() as usize;
+                            let meter = format!("{}{}", "█".repeat(bars), "░".repeat(18 - bars));
+                            let txt = c
+                                .current_db()
+                                .map(|db| format!("{meter} {db:+6.1} dB"))
+                                .unwrap_or_else(|| format!("{meter} {v}"));
+                            (txt, Color::Cyan)
+                        }
+                        None => ("?".into(), Color::Yellow),
+                    },
                 };
-                let style = if i == self.io_cursor {
+                if !c.is_editable() {
+                    val_str.push_str(" [RO]");
+                }
+                let style = if i == cursor {
                     Style::default().add_modifier(Modifier::REVERSED)
                 } else {
                     Style::default()
@@ -1185,7 +1508,7 @@ impl App {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Inputs, Outputs & Device Switches (Space/Enter toggle · h/l adjust · 0 unity · m min) ")
+                .title(" Inputs, Outputs & Device Switches (Space toggle · h/l adjust · 0 unity · m min) ")
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
         f.render_widget(table, area);
@@ -1200,20 +1523,18 @@ impl App {
             return;
         }
 
+        let cursor = self.route_cursor.min(m.routes.len() - 1);
         let visible_rows = area.height.saturating_sub(4).max(1) as usize;
-        let row_start = if self.route_cursor >= visible_rows {
-            self.route_cursor + 1 - visible_rows
-        } else {
-            0
-        };
-        let shown_routes = &m.routes[row_start..(row_start + visible_rows).min(m.routes.len())];
+        let row_start = window_start(cursor, m.routes.len(), visible_rows);
+        let row_end = (row_start + visible_rows).min(m.routes.len());
+        let shown_routes = &m.routes[row_start..row_end];
 
         let rows: Vec<Row> = shown_routes
             .iter()
             .enumerate()
             .map(|(local_i, r)| {
                 let i = row_start + local_i;
-                let style = if i == self.route_cursor {
+                let style = if i == cursor {
                     Style::default().add_modifier(Modifier::REVERSED)
                 } else {
                     Style::default()
@@ -1272,22 +1593,16 @@ impl App {
             return;
         }
 
+        let cur_row = self.matrix_row.min(m.matrix.inputs.len() - 1);
+        let cur_col = self.matrix_col.min(m.matrix.mixes.len() - 1);
         let visible_rows = area.height.saturating_sub(4).max(1) as usize;
         let visible_cols = (area.width.saturating_sub(24).max(9) as usize / 9).max(1);
-        let row_start = if self.matrix_row >= visible_rows {
-            self.matrix_row + 1 - visible_rows
-        } else {
-            0
-        };
-        let col_start = if self.matrix_col >= visible_cols {
-            self.matrix_col + 1 - visible_cols
-        } else {
-            0
-        };
-        let shown_mixes =
-            &m.matrix.mixes[col_start..(col_start + visible_cols).min(m.matrix.mixes.len())];
-        let shown_inputs =
-            &m.matrix.inputs[row_start..(row_start + visible_rows).min(m.matrix.inputs.len())];
+        let row_start = window_start(cur_row, m.matrix.inputs.len(), visible_rows);
+        let col_start = window_start(cur_col, m.matrix.mixes.len(), visible_cols);
+        let row_end = (row_start + visible_rows).min(m.matrix.inputs.len());
+        let col_end = (col_start + visible_cols).min(m.matrix.mixes.len());
+        let shown_mixes = &m.matrix.mixes[col_start..col_end];
+        let shown_inputs = &m.matrix.inputs[row_start..row_end];
 
         let mut header_cells = vec![
             Cell::from("Mixer Input [Source]").style(
@@ -1297,7 +1612,6 @@ impl App {
             ),
         ];
         for &mix in shown_mixes {
-            // Show if this Mix is actively feeding an Analogue Output
             let used = m
                 .routes
                 .iter()
@@ -1334,23 +1648,29 @@ impl App {
 
                 for (local_c, &mix) in shown_mixes.iter().enumerate() {
                     let c_idx = col_start + local_c;
-                    let selected = r_idx == self.matrix_row && c_idx == self.matrix_col;
+                    let selected = r_idx == cur_row && c_idx == cur_col;
                     let (txt, mut style) = if let Some(&cid) = m.matrix.cells.get(&(mix, in_idx))
                         && let Some(c) = m.controls.get(&cid)
                     {
-                        if c.val() <= c.min {
-                            ("  -∞  ".into(), Style::default().fg(Color::DarkGray))
-                        } else if let Some(db) = c.current_db() {
-                            let col = if db > 0.25 {
-                                Color::Red
-                            } else if db.abs() < 0.25 {
-                                Color::Green
-                            } else {
-                                Color::Yellow
-                            };
-                            (format!("{db:+5.1}"), Style::default().fg(col))
-                        } else {
-                            (format!("{:5}", c.val()), Style::default())
+                        match c.opt_val() {
+                            None => ("  ?   ".into(), Style::default().fg(Color::Yellow)),
+                            Some(v) if v <= c.min => {
+                                ("  -∞  ".into(), Style::default().fg(Color::DarkGray))
+                            }
+                            Some(v) => {
+                                if let Some(db) = c.current_db() {
+                                    let col = if db > 0.25 {
+                                        Color::Red
+                                    } else if db.abs() < 0.25 {
+                                        Color::Green
+                                    } else {
+                                        Color::Yellow
+                                    };
+                                    (format!("{db:+5.1}"), Style::default().fg(col))
+                                } else {
+                                    (format!("{v:5}"), Style::default())
+                                }
+                            }
                         }
                     } else {
                         ("  —   ".into(), Style::default().fg(Color::DarkGray))
@@ -1401,11 +1721,17 @@ impl App {
             return;
         }
 
-        let rows: Vec<Row> = links
+        let cursor = self.pw_cursor.min(links.len() - 1);
+        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
+        let row_start = window_start(cursor, links.len(), visible_rows);
+        let row_end = (row_start + visible_rows).min(links.len());
+
+        let rows: Vec<Row> = links[row_start..row_end]
             .iter()
             .enumerate()
-            .map(|(i, l)| {
-                let style = if i == self.pw_cursor {
+            .map(|(local_i, l)| {
+                let i = row_start + local_i;
+                let style = if i == cursor {
                     Style::default().add_modifier(Modifier::REVERSED)
                 } else {
                     Style::default()
@@ -1416,7 +1742,7 @@ impl App {
                 let tag = if is_loopback {
                     "loopback"
                 } else if l.is_scarlett {
-                    "scarlett"
+                    "focusrite"
                 } else {
                     "other"
                 };
@@ -1484,7 +1810,9 @@ impl App {
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
             .highlight_symbol("▸ ");
         let mut state = ListState::default();
-        state.select(Some(picker.selected));
+        if !picker.items.is_empty() {
+            state.select(Some(picker.selected.min(picker.items.len() - 1)));
+        }
         f.render_stateful_widget(list, rect, &mut state);
     }
 
@@ -1496,7 +1824,7 @@ impl App {
                     Style::default().fg(Color::Yellow),
                 )
             } else {
-                let multi = if self.cards.len() > 1 {
+                let multi = if self.cards.len() > 1 && self.card_override.is_none() {
                     " · c switch card"
                 } else {
                     ""
@@ -1512,6 +1840,19 @@ impl App {
     }
 }
 
+fn window_start(cursor: usize, total: usize, visible: usize) -> usize {
+    if total == 0 || visible == 0 {
+        return 0;
+    }
+    let clamped = cursor.min(total - 1);
+    let start = if clamped >= visible {
+        clamped + 1 - visible
+    } else {
+        0
+    };
+    start.min(total.saturating_sub(1))
+}
+
 fn truncate(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -1525,28 +1866,40 @@ fn truncate(s: &str, max_chars: usize) -> String {
 pub fn run_tui(card_override: Option<u32>) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    if let Err(e) = execute!(stdout, EnterAlternateScreen) {
+        let _ = disable_raw_mode();
+        return Err(e);
+    }
+    let _guard = TerminalGuard;
+
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(card_override);
 
-    let res = (|| -> io::Result<()> {
-        while !app.should_quit {
-            app.tick();
-            terminal.draw(|f| app.render(f))?;
-            if event::poll(Duration::from_millis(50))?
-                && let Event::Key(k) = event::read()?
-                && k.kind == KeyEventKind::Press
-            {
-                app.handle_key(k.code, k.modifiers);
-            }
+    while !app.should_quit {
+        app.tick();
+        terminal.draw(|f| app.render(f))?;
+        if event::poll(Duration::from_millis(50))?
+            && let Event::Key(k) = event::read()?
+            && k.kind == KeyEventKind::Press
+        {
+            app.handle_key(k.code, k.modifiers);
         }
-        Ok(())
-    })();
+    }
 
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-    res
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_start_never_exceeds_bounds_after_shrink() {
+        assert_eq!(window_start(25, 4, 10), 0);
+        assert_eq!(window_start(25, 0, 10), 0);
+        assert_eq!(window_start(12, 20, 5), 8);
+        assert_eq!(window_start(19, 20, 5), 15);
+    }
 }

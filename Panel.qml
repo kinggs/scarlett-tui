@@ -4,13 +4,18 @@ import Quickshell
 import Quickshell.Io
 import qs.Ui
 import qs.Commons
+import qs.Commons as Commons
 
 Panel {
   id: root
   moduleName: "io.github.kinggs.scarlett-tui"
   ipcTarget: "io.github.kinggs.scarlett-tui"
 
+  property bool daemonOnline: false
   property bool connected: false
+  property bool mixerAvailable: false
+  property int stateGeneration: 0
+  property string lastError: ""
   property var card: ({})
   property var firmware: null
   property string syncStatus: "Disconnected"
@@ -26,18 +31,21 @@ Panel {
   property var meterDbfs: []
   property int expandedOutput: -1
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
-  readonly property color barFg: bar ? bar.barForeground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
+  readonly property color barFg: bar ? bar.barForeground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property string titleText: {
+    if (!daemonOnline) return "Scarlett"
     if (!connected) return "Scarlett"
     var name = String(card.name || "Focusrite Scarlett")
     return name.replace(/^Focusrite\s+/i, "")
   }
 
   readonly property string subtitleText: {
+    if (!daemonOnline) return "BACKEND UNAVAILABLE · RESTARTING"
     if (!connected) return "NOT CONNECTED"
+    if (!mixerAvailable) return "MIXER UNAVAILABLE · CHECK DRIVER / FCP-SERVER"
     var parts = []
     if (card.generation) parts.push(String(card.generation).toUpperCase())
     if (activeRate) {
@@ -57,7 +65,7 @@ Panel {
     return false
   }
 
-  // Pick up to 6 key meter channels (Outputs + active Inputs) for the compact panel view.
+  // Pick up to 6 key meter channels (Outputs + active Inputs, or neutral fallback meters).
   readonly property var visibleMeters: {
     var out = []
     for (var i = 0; i < meterLabels.length; i++) {
@@ -68,6 +76,12 @@ Panel {
       }
       if (out.length >= 6) break
     }
+    if (out.length === 0) {
+      for (var j = 0; j < meterLabels.length && out.length < 6; j++) {
+        var fm = meterLabels[j]
+        if (fm && fm.group === "Meters") out.push(fm)
+      }
+    }
     return out
   }
 
@@ -76,7 +90,7 @@ Panel {
   }
 
   function setControl(numid, value) {
-    send("set " + numid + " " + Math.round(Number(value)))
+    send("set " + numid + " " + Math.round(Number(value)) + " " + root.stateGeneration)
   }
 
   function cycleToggle(t) {
@@ -84,7 +98,8 @@ Panel {
     if (t.kind === "bool") {
       setControl(t.numid, t.active ? 0 : 1)
     } else if (t.kind === "enum" && t.items && t.items.length > 0) {
-      var next = (Number(t.value) + 1) % t.items.length
+      var cur = (t.value === null || t.value === undefined) ? 0 : Number(t.value)
+      var next = (cur + 1) % t.items.length
       setControl(t.numid, next)
     }
   }
@@ -114,20 +129,27 @@ Panel {
   }
 
   function meterColor(idx) {
-    if (idx < 0 || idx >= meterDbfs.length) return Color.accent
+    if (idx < 0 || idx >= meterDbfs.length) return Commons.Color.accent
     var db = Number(meterDbfs[idx])
-    if (db >= -1) return Color.urgent
+    if (db >= -1) return Commons.Color.urgent
     if (db >= -9) return "#e0af68"
-    return Color.accent
+    return Commons.Color.accent
   }
 
   function handleMessage(line) {
     var msg
     try { msg = JSON.parse(line) } catch (e) { return }
-    if (msg.type === "meters") {
+    daemonOnline = true
+    if (msg.type === "error") {
+      lastError = String(msg.message || "Control update failed")
+      errorTimer.restart()
+    } else if (msg.type === "meters") {
       meterDbfs = msg.dbfs || []
     } else if (msg.type === "state") {
+      var wasConnected = connected
       connected = !!msg.connected
+      mixerAvailable = msg.mixer_available !== false && connected
+      stateGeneration = Number(msg.generation || 0)
       card = msg.card || {}
       firmware = msg.firmware !== undefined ? msg.firmware : null
       syncStatus = String(msg.sync_status || "Disconnected")
@@ -140,7 +162,15 @@ Panel {
       matrixSize = String(msg.matrix_size || "")
       pwScarlettLinks = Number(msg.pw_scarlett_links || 0)
       meterLabels = msg.meter_labels || []
-      if (!connected) meterDbfs = []
+      if (!connected || !mixerAvailable) {
+        meterDbfs = []
+        expandedOutput = -1
+      } else if (expandedOutput >= outputs.length) {
+        expandedOutput = -1
+      }
+      if (!wasConnected && connected && root.opened) {
+        send("meters on")
+      }
     }
   }
 
@@ -163,8 +193,19 @@ Panel {
     stdout: SplitParser {
       onRead: function(data) { root.handleMessage(data) }
     }
+    onRunningChanged: {
+      if (running) {
+        root.send("refresh")
+        if (root.opened) root.send("meters on")
+      }
+    }
     onExited: {
+      root.daemonOnline = false
       root.connected = false
+      root.mixerAvailable = false
+      root.stateGeneration = 0
+      root.meterDbfs = []
+      root.expandedOutput = -1
       restartTimer.start()
     }
   }
@@ -175,6 +216,12 @@ Panel {
     onTriggered: daemon.running = true
   }
 
+  Timer {
+    id: errorTimer
+    interval: 4000
+    onTriggered: root.lastError = ""
+  }
+
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
@@ -182,11 +229,13 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.connected ? "󰓃" : "󰓄"
-    opacity: root.connected ? 1.0 : 0.45
-    tooltipText: root.connected
-      ? root.titleText + " · " + root.subtitleText + " (right-click: open TUI)"
-      : "Scarlett not connected"
+    text: (root.connected && root.mixerAvailable) ? "󰓃" : "󰓄"
+    opacity: (root.connected && root.mixerAvailable) ? 1.0 : 0.45
+    tooltipText: !root.daemonOnline
+      ? "Scarlett backend unavailable (restarting)"
+      : root.connected
+        ? root.titleText + " · " + root.subtitleText + " (right-click: open TUI)"
+        : "Scarlett not connected"
     onPressed: function(b) {
       if (b === Qt.RightButton || b === Qt.MiddleButton) root.openTui()
       else root.toggle()
@@ -237,11 +286,11 @@ Panel {
             Text {
               id: heroIcon
               textFormat: Text.PlainText
-              text: root.connected ? "󰓃" : "󰓄"
+              text: (root.connected && root.mixerAvailable) ? "󰓃" : "󰓄"
               color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
-              opacity: root.connected ? 1.0 : 0.45
+              opacity: (root.connected && root.mixerAvailable) ? 1.0 : 0.45
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
             }
@@ -293,14 +342,26 @@ Panel {
             }
           }
 
+          // ---------- Inline error banner (write / stale-state rejections) ----------
+          Text {
+            visible: root.lastError.length > 0
+            width: parent.width
+            textFormat: Text.PlainText
+            text: root.lastError
+            color: Commons.Color.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           // ---------- Live Hardware Meters ----------
           PanelSeparator {
-            visible: root.connected && root.visibleMeters.length > 0
+            visible: root.connected && root.mixerAvailable && root.visibleMeters.length > 0
             foreground: root.fg
           }
 
           Column {
-            visible: root.connected && root.visibleMeters.length > 0
+            visible: root.connected && root.mixerAvailable && root.visibleMeters.length > 0
             width: parent.width
             spacing: Style.space(5)
 
@@ -333,7 +394,7 @@ Panel {
                   width: Math.max(Style.space(80), panelColumn.width - Style.space(175))
                   height: Style.space(6)
                   radius: height / 2
-                  color: Style.normalFillFor(root.fg, Color.accent)
+                  color: Style.normalFillFor(root.fg, Commons.Color.accent)
                   anchors.verticalCenter: parent.verticalCenter
 
                   Rectangle {
@@ -363,12 +424,12 @@ Panel {
 
           // ---------- Inputs & 48V ----------
           PanelSeparator {
-            visible: root.connected && (root.inputs.length > 0 || root.phantom.length > 0)
+            visible: root.connected && root.mixerAvailable && (root.inputs.length > 0 || root.phantom.length > 0)
             foreground: root.fg
           }
 
           Column {
-            visible: root.connected && (root.inputs.length > 0 || root.phantom.length > 0)
+            visible: root.connected && root.mixerAvailable && (root.inputs.length > 0 || root.phantom.length > 0)
             width: parent.width
             spacing: Style.space(8)
 
@@ -415,6 +476,8 @@ Panel {
                       }
                       bordered: true
                       selected: !!modelData.active
+                      enabled: !!modelData.rw
+                      opacity: modelData.rw ? 1.0 : 0.45
                       foreground: root.fg
                       fontFamily: root.fontFamily
                       fontSize: Style.font.caption
@@ -449,6 +512,8 @@ Panel {
                 ToggleSwitch {
                   id: phSwitch
                   checked: !!modelData.active
+                  enabled: !!modelData.rw
+                  opacity: modelData.rw ? 1.0 : 0.45
                   foreground: root.fg
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
@@ -460,12 +525,12 @@ Panel {
 
           // ---------- Outputs & Routing ----------
           PanelSeparator {
-            visible: root.connected && root.outputs.length > 0
+            visible: root.connected && root.mixerAvailable && root.outputs.length > 0
             foreground: root.fg
           }
 
           Column {
-            visible: root.connected && root.outputs.length > 0
+            visible: root.connected && root.mixerAvailable && root.outputs.length > 0
             width: parent.width
             spacing: Style.space(6)
 
@@ -549,6 +614,8 @@ Panel {
                     Button {
                       id: muteBtn
                       visible: modelData.mute_numid !== null && modelData.mute_numid !== undefined
+                      enabled: !!modelData.mute_rw
+                      opacity: modelData.mute_rw ? 1.0 : 0.45
                       text: modelData.muted ? "MUTED" : "ON"
                       bordered: true
                       selected: !modelData.muted
@@ -558,16 +625,22 @@ Panel {
                       verticalPadding: Style.space(2)
                       anchors.right: parent.right
                       anchors.verticalCenter: parent.verticalCenter
-                      onClicked: root.setControl(modelData.mute_numid, modelData.muted ? 0 : 1)
+                      onClicked: {
+                        if (modelData.mute_rw) {
+                          root.setControl(modelData.mute_numid, modelData.muted ? 0 : 1)
+                        }
+                      }
                     }
                   }
 
                   MouseArea {
                     anchors.fill: parent
                     anchors.rightMargin: muteBtn.visible ? muteBtn.width + Style.space(12) : 0
-                    cursorShape: Qt.PointingHandCursor
+                    cursorShape: (modelData.route_numid !== null && modelData.route_numid !== undefined && modelData.route_rw)
+                      ? Qt.PointingHandCursor
+                      : Qt.ArrowCursor
                     onClicked: {
-                      if (modelData.route_numid !== null && modelData.route_numid !== undefined) {
+                      if (modelData.route_numid !== null && modelData.route_numid !== undefined && modelData.route_rw) {
                         root.expandedOutput = root.expandedOutput === index ? -1 : index
                       }
                     }
@@ -589,13 +662,16 @@ Panel {
                       readonly property var parentOut: root.outputs[root.expandedOutput]
                       text: String(modelData)
                       bordered: true
-                      selected: parentOut ? Number(parentOut.route_val) === index : false
+                      selected: parentOut && parentOut.route_val !== null && parentOut.route_val !== undefined
+                        ? Number(parentOut.route_val) === index
+                        : false
+                      enabled: parentOut ? !!parentOut.route_rw : false
                       foreground: root.fg
                       fontFamily: root.fontFamily
                       fontSize: Style.font.caption
                       verticalPadding: Style.space(2)
                       onClicked: {
-                        if (parentOut && parentOut.route_numid !== null) {
+                        if (parentOut && parentOut.route_numid !== null && parentOut.route_rw) {
                           root.setControl(parentOut.route_numid, index)
                           root.expandedOutput = -1
                         }
@@ -609,12 +685,12 @@ Panel {
 
           // ---------- Footer: Matrix + PipeWire links shortcut ----------
           PanelSeparator {
-            visible: root.connected
+            visible: root.connected && root.mixerAvailable
             foreground: root.fg
           }
 
           Item {
-            visible: root.connected
+            visible: root.connected && root.mixerAvailable
             width: parent.width
             implicitHeight: footerBtn.implicitHeight
 

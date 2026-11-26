@@ -52,7 +52,7 @@ playbook in **[docs/HARDWARE-TESTING.md](docs/HARDWARE-TESTING.md)**:
 
 ```sh
 scarlett-tui --list
-scarlett-tui --json    # safe to share: omits serial numbers and local paths
+scarlett-tui --json    # diagnostic snapshot (omits dedicated serial/path fields; review before posting)
 ```
 
 Open a [Device support](https://github.com/kinggs/scarlett-tui/issues/new?template=device-support.yml)
@@ -131,10 +131,15 @@ flowchart LR
 - **Linux kernel 6.7+** (mainline `snd_usb_audio` enables the `scarlett2` mixer
   driver automatically without module options; older kernels require
   `options snd_usb_audio vid=0x1235 pid=0x<pid> device_setup=1`).
+- **Large Scarlett Gen 4 (`16i16`, `18i16`, `18i20`):** require Linux `6.14+`
+  FCP support and the userspace **`fcp-server`** daemon running so ALSA mixer
+  controls exist. Without `fcp-server`, `scarlett-tui` detects the USB card and
+  reports *Mixer unavailable* until controls appear.
 - **Runtime:** `alsa-lib` (`libasound.so.2`). Optional: `pipewire` (`pw-link`)
   for Tab 5; Omarchy 4 + Quickshell if using the bar plugin.
-- **Build:** Rust `1.100.0` (pinned in `rust-toolchain.toml` and `mise.toml`),
-  `alsa-lib` headers, and a C linker.
+- **Build:** Rust `1.100.0` (pinned in `rust-toolchain.toml`, `mise.toml`, and
+  `Cargo.toml`), `libasound` linker library (`alsa-lib` / `libasound2-dev`),
+  and a C linker.
 
 ## Install
 
@@ -144,7 +149,7 @@ flowchart LR
 git clone https://github.com/kinggs/scarlett-tui.git
 cd scarlett-tui
 mise install      # optional: installs the pinned Rust 1.100.0
-make install      # builds release binary -> ~/.local/bin/scarlett-tui + desktop entry
+make install      # builds release binary -> ~/.local/bin/scarlett-tui + portable Terminal=true desktop entry
 ```
 
 Run it in any terminal with:
@@ -164,14 +169,15 @@ cd scarlett-tui
 make install-plugin
 ```
 
-This builds and installs `~/.local/bin/scarlett-tui`, validates `manifest.json`
-and `Panel.qml`, links the repository into
-`~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui`, and enables the bar
-widget on the right section of the Omarchy bar.
+This builds and installs `~/.local/bin/scarlett-tui`, updates the desktop entry
+for `omarchy-launch-or-focus-tui`, validates `manifest.json` and `Panel.qml`,
+links the repository into `~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui`,
+and enables the bar widget on the right section of the Omarchy bar.
 
 *(If you added the repository via `omarchy plugin add https://github.com/kinggs/scarlett-tui.git`,
 run `cd ~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui && make install`
-once to build the Rust binary.)*
+once to build the Rust binary. To remove a marketplace checkout, use
+`omarchy plugin remove io.github.kinggs.scarlett-tui`.)*
 
 ### Remove
 

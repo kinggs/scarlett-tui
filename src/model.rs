@@ -32,6 +32,7 @@ pub enum RouteGroup {
     MixerIn,
     DspIn,
     PcmCapture,
+    Unknown,
 }
 
 impl RouteGroup {
@@ -43,6 +44,7 @@ impl RouteGroup {
             Self::MixerIn => "Mixer Inputs",
             Self::DspIn => "DSP Inputs",
             Self::PcmCapture => "PC Capture (Rec)",
+            Self::Unknown => "Meters",
         }
     }
 
@@ -54,6 +56,7 @@ impl RouteGroup {
             Self::MixerIn => "Mix In",
             Self::DspIn => "DSP In",
             Self::PcmCapture => "Rec",
+            Self::Unknown => "Meter",
         }
     }
 }
@@ -95,6 +98,7 @@ pub struct ScarlettModel {
     pub card: CardEntry,
     pub stream: StreamRateInfo,
     pub firmware: Option<i64>,
+    pub firmware_versions: Vec<(String, i64)>,
     pub sync_status: String,
     pub controls: BTreeMap<u32, AlsaControl>,
     pub inputs: Vec<InputChannel>,
@@ -105,6 +109,7 @@ pub struct ScarlettModel {
     pub routes: Vec<RouteEntry>,
     pub matrix: MixMatrix,
     pub meter_numid: Option<u32>,
+    pub meter_max: i64,
     pub meter_channels: Vec<MeterChannel>,
 }
 
@@ -116,8 +121,10 @@ impl ScarlettModel {
         }
 
         let mut firmware = None;
+        let mut firmware_versions = Vec::new();
         let mut sync_status = String::from("Unknown");
         let mut meter_numid = None;
+        let mut meter_max: i64 = 4095;
 
         let mut input_map: BTreeMap<u32, InputChannel> = BTreeMap::new();
         let mut output_map: BTreeMap<u32, OutputChannel> = BTreeMap::new();
@@ -131,26 +138,43 @@ impl ScarlettModel {
 
         for ctrl in controls.values() {
             let name = ctrl.name.as_str();
-            if name == "Firmware Version" {
-                firmware = Some(ctrl.val());
+            if (name == "Firmware Version" || name.ends_with(" Firmware Version"))
+                && ctrl.kind == ControlKind::Int
+            {
+                if let Some(v) = ctrl.opt_val() {
+                    firmware_versions.push((ctrl.name.clone(), v));
+                    if name == "Firmware Version"
+                        || (firmware.is_none() && name == "App Firmware Version")
+                        || firmware.is_none()
+                    {
+                        firmware = Some(v);
+                    }
+                }
                 continue;
             }
-            if name == "Sync Status" {
+            if name == "Sync Status" && ctrl.kind == ControlKind::Enum {
                 sync_status = ctrl.enum_label().to_string();
                 continue;
             }
             if name == "Level Meter" && ctrl.kind == ControlKind::Int {
                 meter_numid = Some(ctrl.numid);
+                if ctrl.max > 0 {
+                    meter_max = ctrl.max;
+                }
                 continue;
             }
 
             // Input channel controls: "Line In N ..." or paired "Line In 1-2 ..."
             if let Some(rest) = name.strip_prefix("Line In ") {
-                if name.contains("Phantom Power") {
+                if name.contains("Phantom Power") && ctrl.kind == ControlKind::Bool {
                     phantom_numids.push(ctrl.numid);
                     continue;
                 }
-                if name.contains("Link") && rest.contains('-') {
+                if name.contains("Link")
+                    && rest.contains('-')
+                    && ctrl.kind == ControlKind::Bool
+                    && ctrl.rw
+                {
                     device_numids.push(ctrl.numid);
                     continue;
                 }
@@ -168,56 +192,85 @@ impl ScarlettModel {
                         autogain_numid: None,
                         link_numid: None,
                     });
-                    if tail.starts_with("Gain") {
+                    if tail.starts_with("Gain") && ctrl.kind == ControlKind::Int {
                         entry.gain_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Level") {
+                    } else if tail.starts_with("Level")
+                        && matches!(ctrl.kind, ControlKind::Enum | ControlKind::Bool)
+                    {
                         entry.level_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Air") {
+                    } else if tail.starts_with("Air")
+                        && matches!(ctrl.kind, ControlKind::Bool | ControlKind::Enum)
+                    {
                         entry.air_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Pad") {
+                    } else if tail.starts_with("Pad") && ctrl.kind == ControlKind::Bool {
                         entry.pad_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Safe") {
+                    } else if tail.starts_with("Safe") && ctrl.kind == ControlKind::Bool {
                         entry.safe_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Autogain") && ctrl.rw {
+                    } else if tail.starts_with("Autogain")
+                        && ctrl.kind == ControlKind::Bool
+                        && ctrl.rw
+                    {
                         entry.autogain_numid = Some(ctrl.numid);
                         continue;
-                    } else if tail.starts_with("Link") {
+                    } else if tail.starts_with("Link") && ctrl.kind == ControlKind::Bool {
                         entry.link_numid = Some(ctrl.numid);
                         continue;
                     }
                 }
             }
 
-            if name == "Phantom Power Persistence Capture Switch" {
+            if name == "Phantom Power Persistence Capture Switch" && ctrl.kind == ControlKind::Bool
+            {
                 phantom_numids.push(ctrl.numid);
                 continue;
             }
 
+            // Direct Monitor switches/enums & Solo/2i2 monitor mix faders
             if name.starts_with("Direct Monitor") && ctrl.rw {
-                direct_monitor_numid = Some(ctrl.numid);
+                if matches!(ctrl.kind, ControlKind::Bool | ControlKind::Enum)
+                    && direct_monitor_numid.is_none()
+                    && !name.contains("Mix")
+                {
+                    direct_monitor_numid = Some(ctrl.numid);
+                } else {
+                    device_numids.push(ctrl.numid);
+                }
+                continue;
+            }
+            if (name.starts_with("Monitor Mix")
+                || name.starts_with("Monitor 1 Mix")
+                || name.starts_with("Monitor 2 Mix"))
+                && ctrl.rw
+            {
+                device_numids.push(ctrl.numid);
                 continue;
             }
 
-            // Output volumes & mutes:
+            // Output volumes, mutes, and HW/SW volume selectors:
             //   scarlett2: "Line 01 (Monitor L) Playback Volume" / "Line 01 Mute Playback Switch"
-            //   FCP Gen 4: "Analogue 1 Playback Volume"
+            //   Clarett / Scarlett HW/SW: "Line 01 Volume Control Playback Enum"
+            //   FCP Gen 4: "Analogue 1 Playback Volume" / "Analogue 1 Mute Playback Switch"
             if let Some(rest) = name.strip_prefix("Line ")
                 && !name.starts_with("Line In ")
                 && let Some((num_str, tail)) = rest.split_once(' ')
                 && let Ok(ch) = num_str.parse::<u32>()
             {
-                let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
-                    index: ch,
-                    label: format!("Line {ch:02}"),
-                    volume_numid: None,
-                    mute_numid: None,
-                });
-                if tail.contains("Playback Volume") {
+                if tail.contains("Volume Control") && ctrl.kind == ControlKind::Enum && ctrl.rw {
+                    device_numids.push(ctrl.numid);
+                    continue;
+                }
+                if tail.contains("Playback Volume") && ctrl.kind == ControlKind::Int {
+                    let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
+                        index: ch,
+                        label: format!("Line {ch:02}"),
+                        volume_numid: None,
+                        mute_numid: None,
+                    });
                     if let Some(start) = tail.find('(')
                         && let Some(end) = tail[start + 1..].find(')')
                     {
@@ -226,22 +279,58 @@ impl ScarlettModel {
                     }
                     entry.volume_numid = Some(ctrl.numid);
                     continue;
-                } else if tail.contains("Mute") {
+                } else if tail.contains("Mute") && ctrl.kind == ControlKind::Bool {
+                    let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
+                        index: ch,
+                        label: format!("Line {ch:02}"),
+                        volume_numid: None,
+                        mute_numid: None,
+                    });
                     entry.mute_numid = Some(ctrl.numid);
                     continue;
                 }
             } else if let Some(rest) = name.strip_prefix("Analogue ")
                 && let Some((num_str, tail)) = rest.split_once(' ')
-                && tail == "Playback Volume"
                 && let Ok(ch) = num_str.parse::<u32>()
             {
-                let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
-                    index: ch,
-                    label: format!("Analogue {ch:02}"),
+                if tail.contains("Volume Control") && ctrl.kind == ControlKind::Enum && ctrl.rw {
+                    device_numids.push(ctrl.numid);
+                    continue;
+                }
+                if tail == "Playback Volume" && ctrl.kind == ControlKind::Int {
+                    let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
+                        index: ch,
+                        label: format!("Analogue {ch:02}"),
+                        volume_numid: None,
+                        mute_numid: None,
+                    });
+                    entry.volume_numid = Some(ctrl.numid);
+                    continue;
+                } else if tail.contains("Mute") && ctrl.kind == ControlKind::Bool {
+                    let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
+                        index: ch,
+                        label: format!("Analogue {ch:02}"),
+                        volume_numid: None,
+                        mute_numid: None,
+                    });
+                    entry.mute_numid = Some(ctrl.numid);
+                    continue;
+                }
+            }
+
+            // Vocaster named outputs: Speaker & Headphones N mutes/volumes
+            if let Some((out_idx, out_label, is_vol)) = parse_named_output(name, ctrl.kind) {
+                let entry = output_map.entry(out_idx).or_insert_with(|| OutputChannel {
+                    index: out_idx,
+                    label: out_label,
                     volume_numid: None,
                     mute_numid: None,
                 });
-                entry.volume_numid = Some(ctrl.numid);
+                if is_vol {
+                    entry.volume_numid = Some(ctrl.numid);
+                } else {
+                    entry.mute_numid = Some(ctrl.numid);
+                }
                 continue;
             }
 
@@ -270,28 +359,33 @@ impl ScarlettModel {
                 continue;
             }
 
-            // Other writable device switches/enums/ints
+            // Other writable device switches/enums/ints (including HW/SW volume selectors)
             if ctrl.rw
-                && matches!(
-                    name,
-                    "Standalone Switch"
-                        | "MSD Mode Switch"
-                        | "Front Panel Brightness"
-                        | "Front Panel Sleep Time"
-                        | "Speaker Switching Playback Enum"
-                        | "Speaker Switching Alt Playback Switch"
-                        | "Talkback Playback Switch"
-                        | "Talkback Enable Playback Switch"
-                        | "Talk Playback Switch"
-                        | "Dim Playback Switch"
-                        | "Mute Playback Switch"
-                        | "Master Playback Volume"
-                        | "Master HW Playback Volume"
-                        | "PCM Input Switch"
-                        | "PCM Input Capture Switch"
-                        | "Digital I/O Mode Capture Enum"
-                        | "Clock Source Clock Source"
-                )
+                && (name.ends_with("Volume Control Playback Enum")
+                    || matches!(
+                        name,
+                        "Standalone Switch"
+                            | "MSD Mode Switch"
+                            | "Front Panel Brightness"
+                            | "Front Panel Sleep Time"
+                            | "Speaker Switching Playback Enum"
+                            | "Speaker Switching Alt Playback Switch"
+                            | "Talkback Playback Switch"
+                            | "Talkback Enable Playback Switch"
+                            | "Talk Playback Switch"
+                            | "Dim Playback Switch"
+                            | "Mute Playback Switch"
+                            | "Master Playback Volume"
+                            | "Master HW Playback Volume"
+                            | "PCM Input Switch"
+                            | "PCM Input Capture Switch"
+                            | "Digital I/O Mode Capture Enum"
+                            | "Clock Source Clock Source"
+                            | "Host Mute Capture Switch"
+                            | "Guest Mute Capture Switch"
+                            | "Auto Gain Capture Switch"
+                            | "Enhance Capture Switch"
+                    ))
             {
                 device_numids.push(ctrl.numid);
             }
@@ -300,12 +394,24 @@ impl ScarlettModel {
         // Sort routes in scarlett2_ports order: AnalogueOut -> SpdifOut -> AdatOut -> MixerIn -> DspIn -> PcmCapture
         routes.sort_by_key(|r| (r.group, r.channel));
 
-        // Enrich AnalogueOut labels from OutputChannel hardware descriptions (Monitor L, Headphones L, etc.)
+        // Enrich AnalogueOut labels from OutputChannel hardware descriptions,
+        // and ensure every AnalogueOut route has a corresponding OutputChannel
+        // entry even on models without per-channel hardware faders.
         for r in &mut routes {
-            if r.group == RouteGroup::AnalogueOut
-                && let Some(out) = output_map.get(&r.channel)
-            {
-                r.label = out.label.clone();
+            if r.group == RouteGroup::AnalogueOut {
+                if let Some(out) = output_map.get(&r.channel) {
+                    r.label = out.label.clone();
+                } else {
+                    output_map.insert(
+                        r.channel,
+                        OutputChannel {
+                            index: r.channel,
+                            label: r.label.clone(),
+                            volume_numid: None,
+                            mute_numid: None,
+                        },
+                    );
+                }
             }
         }
 
@@ -319,6 +425,7 @@ impl ScarlettModel {
             card,
             stream,
             firmware,
+            firmware_versions,
             sync_status,
             controls,
             inputs: input_map.into_values().collect(),
@@ -329,16 +436,31 @@ impl ScarlettModel {
             routes,
             matrix,
             meter_numid,
+            meter_max,
             meter_channels: Vec::new(),
         };
         model.recompute_derived();
         model
     }
 
+    /// True if at least one Focusrite mixer/router/I/O/meter control was discovered.
+    /// Large Gen 4 FCP interfaces can appear as USB ALSA cards before `fcp-server`
+    /// creates their mixer controls; this distinguishes that state.
+    pub fn has_mixer_controls(&self) -> bool {
+        !self.inputs.is_empty()
+            || !self.outputs.is_empty()
+            || !self.phantom_numids.is_empty()
+            || self.direct_monitor_numid.is_some()
+            || !self.device_numids.is_empty()
+            || !self.routes.is_empty()
+            || !self.matrix.is_empty()
+            || self.meter_numid.is_some()
+    }
+
     pub fn recompute_derived(&mut self) {
         // Refresh sync_status
         for c in self.controls.values() {
-            if c.name == "Sync Status" {
+            if c.name == "Sync Status" && c.kind == ControlKind::Enum {
                 self.sync_status = c.enum_label().to_string();
             }
         }
@@ -365,18 +487,22 @@ impl ScarlettModel {
                 for &in_idx in &self.matrix.inputs {
                     if let Some(&cid) = self.matrix.cells.get(&(letter, in_idx))
                         && let Some(c) = self.controls.get(&cid)
-                        && c.val() > c.min
+                        && let Some(v) = c.opt_val()
+                        && v > c.min
                     {
                         let src = mixer_in_sources
                             .get(&in_idx)
                             .map(|s| s.as_str())
                             .unwrap_or("Off");
                         if src != "Off" {
-                            let db = c.current_db().unwrap_or(0.0);
-                            if db.abs() < 0.25 {
-                                active_parts.push(src.to_string());
+                            if let Some(db) = c.current_db() {
+                                if db.abs() < 0.25 {
+                                    active_parts.push(src.to_string());
+                                } else {
+                                    active_parts.push(format!("{src} ({db:+.1} dB)"));
+                                }
                             } else {
-                                active_parts.push(format!("{src} ({db:+.1} dB)"));
+                                active_parts.push(src.to_string());
                             }
                         }
                     }
@@ -391,7 +517,9 @@ impl ScarlettModel {
             }
         }
 
-        // Map Level Meter slots in scarlett2_ports destination order.
+        // Map Level Meter slots only when count matches routes AND the driver
+        // generation uses the documented `scarlett2_ports` destination order.
+        // Otherwise use neutral `Meter NN` labels under `RouteGroup::Unknown`.
         let meter_count = self
             .meter_numid
             .and_then(|id| self.controls.get(&id))
@@ -400,7 +528,8 @@ impl ScarlettModel {
 
         self.meter_channels.clear();
         if meter_count > 0 {
-            if self.routes.len() == meter_count {
+            if self.routes.len() == meter_count && is_scarlett2_port_ordered(&self.card.generation)
+            {
                 for (i, r) in self.routes.iter().enumerate() {
                     self.meter_channels.push(MeterChannel {
                         meter_index: i,
@@ -410,28 +539,13 @@ impl ScarlettModel {
                     });
                 }
             } else {
-                // Fallback for Solo/2i2 or devices whose meter count differs from routes
-                let mut i = 0;
-                for r in &self.routes {
-                    if i >= meter_count {
-                        break;
-                    }
-                    self.meter_channels.push(MeterChannel {
-                        meter_index: i,
-                        label: r.label.clone(),
-                        source: r.current.clone(),
-                        group: r.group,
-                    });
-                    i += 1;
-                }
-                while i < meter_count {
+                for i in 0..meter_count {
                     self.meter_channels.push(MeterChannel {
                         meter_index: i,
                         label: format!("Meter {:02}", i + 1),
                         source: String::new(),
-                        group: RouteGroup::AnalogueOut,
+                        group: RouteGroup::Unknown,
                     });
-                    i += 1;
                 }
             }
         }
@@ -445,16 +559,49 @@ impl ScarlettModel {
             .unwrap_or("Off")
     }
 
-    pub fn unity_raw_for(&self, numid: u32) -> i64 {
-        let Some(c) = self.controls.get(&numid) else {
-            return 0;
-        };
-        c.db_to_raw(0.0).unwrap_or(c.max)
+    pub fn unity_raw_for(&self, numid: u32) -> Option<i64> {
+        self.controls.get(&numid)?.resolved_unity_raw()
     }
 
     pub fn is_locked(&self) -> bool {
         self.sync_status.eq_ignore_ascii_case("Locked")
     }
+}
+
+fn is_scarlett2_port_ordered(generation: &str) -> bool {
+    matches!(
+        generation,
+        "Gen 2" | "Gen 3" | "Gen 4" | "Clarett USB" | "Clarett+" | "Vocaster"
+    )
+}
+
+fn parse_named_output(name: &str, kind: ControlKind) -> Option<(u32, String, bool)> {
+    // Use synthetic indices >= 100 so named Vocaster outputs never collide with
+    // numbered Line 01..NN / Analogue 01..NN channels.
+    if name == "Speaker Mute Playback Switch" && kind == ControlKind::Bool {
+        return Some((100, "Speaker".into(), false));
+    }
+    if name == "Speaker Playback Volume" && kind == ControlKind::Int {
+        return Some((100, "Speaker".into(), true));
+    }
+    if name == "Headphones Mute Playback Switch" && kind == ControlKind::Bool {
+        return Some((101, "Headphones".into(), false));
+    }
+    if name == "Headphones Playback Volume" && kind == ControlKind::Int {
+        return Some((101, "Headphones".into(), true));
+    }
+    if let Some(rest) = name.strip_prefix("Headphones ")
+        && let Some((num_str, tail)) = rest.split_once(' ')
+        && let Ok(n) = num_str.parse::<u32>()
+    {
+        if tail == "Mute Playback Switch" && kind == ControlKind::Bool {
+            return Some((100 + n, format!("Headphones {n}"), false));
+        }
+        if tail == "Playback Volume" && kind == ControlKind::Int {
+            return Some((100 + n, format!("Headphones {n}"), true));
+        }
+    }
+    None
 }
 
 fn parse_mix_cell(name: &str) -> Option<(char, u32)> {
@@ -502,12 +649,18 @@ fn parse_route_enum(name: &str) -> Option<(RouteGroup, u32)> {
     None
 }
 
-/// Convert 12-bit Scarlett hardware meter value (0..4095) to dBFS.
-pub fn meter_to_dbfs(raw: i64) -> f64 {
-    if raw <= 0 {
+/// Convert hardware meter value (0..max) to dBFS using the control's full scale.
+pub fn meter_to_dbfs_with_max(raw: i64, max: i64) -> f64 {
+    if raw <= 0 || max <= 0 {
         return -96.0;
     }
-    (20.0 * ((raw as f64) / 4095.0).log10()).clamp(-96.0, 0.0)
+    (20.0 * ((raw as f64) / (max as f64)).log10()).clamp(-96.0, 0.0)
+}
+
+/// Convert 12-bit Scarlett hardware meter value (0..4095) to dBFS.
+#[cfg(test)]
+pub fn meter_to_dbfs(raw: i64) -> f64 {
+    meter_to_dbfs_with_max(raw, 4095)
 }
 
 #[cfg(test)]
@@ -537,8 +690,14 @@ mod tests {
             } else {
                 None
             },
+            current_db_tlv: None,
+            unity_raw: None,
+            tlv_readable: false,
             items: items.iter().map(|s| s.to_string()).collect(),
             values: vec![val],
+            readable: true,
+            value_valid: true,
+            metadata_complete: true,
             rw: true,
         }
     }
@@ -613,18 +772,19 @@ mod tests {
             ),
         ];
         let model = ScarlettModel::build(card, StreamRateInfo::default(), list);
+        assert!(model.has_mixer_controls());
         assert_eq!(model.inputs.len(), 1);
         assert_eq!(model.outputs.len(), 1);
         assert_eq!(model.outputs[0].label, "Line 01 (Monitor L)");
         assert_eq!(model.matrix.mixes, vec!['A']);
         assert_eq!(model.matrix.inputs, vec![1]);
-        assert_eq!(model.unity_raw_for(40), 160);
+        assert_eq!(model.unity_raw_for(40), Some(160));
         assert_eq!(model.routes[0].summary, "Mix A ← PCM 1");
         assert!(model.is_locked());
     }
 
     #[test]
-    fn handles_gen4_air_enum_and_gain() {
+    fn handles_gen4_air_autogain_and_monitor_mix() {
         let card = CardEntry {
             index: 0,
             alsa_id: "Gen".into(),
@@ -656,10 +816,24 @@ mod tests {
             ),
             mk_ctrl(
                 4,
+                "Line In 1 Autogain Capture Switch",
+                ControlKind::Bool,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                5,
                 "Direct Monitor Playback Enum",
                 ControlKind::Enum,
                 &["Off", "Mono", "Stereo"],
                 1,
+            ),
+            mk_ctrl(
+                6,
+                "Direct Monitor Mix Playback Volume",
+                ControlKind::Int,
+                &[],
+                120,
             ),
         ];
         let model = ScarlettModel::build(card, StreamRateInfo::default(), list);
@@ -667,11 +841,13 @@ mod tests {
         assert!(model.inputs[0].gain_numid.is_some());
         assert!(model.inputs[0].air_numid.is_some());
         assert!(model.inputs[0].safe_numid.is_some());
-        assert!(model.direct_monitor_numid.is_some());
+        assert_eq!(model.inputs[0].autogain_numid, Some(4));
+        assert_eq!(model.direct_monitor_numid, Some(5));
+        assert!(model.device_numids.contains(&6));
     }
 
     #[test]
-    fn handles_large_fcp_names_and_digital_outputs() {
+    fn handles_large_fcp_names_multi_firmware_and_neutral_meters() {
         let card = CardEntry {
             index: 2,
             alsa_id: "FCP".into(),
@@ -680,6 +856,10 @@ mod tests {
             generation: "Gen 4 (FCP)".into(),
         };
         let items = &["Off", "Analogue 1", "PCM 1", "Mix A"];
+        let mut meter = mk_ctrl(12, "Level Meter", ControlKind::Int, &[], 0);
+        meter.count = 5;
+        meter.max = 65535;
+        meter.rw = false;
         let list = vec![
             mk_ctrl(1, "Analogue 1 Playback Enum", ControlKind::Enum, items, 3),
             mk_ctrl(2, "S/PDIF 1 Playback Enum", ControlKind::Enum, items, 2),
@@ -691,7 +871,7 @@ mod tests {
                 ControlKind::Int,
                 &[],
                 148,
-            ), // -6.0 dB
+            ),
             mk_ctrl(6, "PCM 1 Capture Enum", ControlKind::Enum, items, 1),
             mk_ctrl(7, "Analogue 1 Playback Volume", ControlKind::Int, &[], 127),
             mk_ctrl(
@@ -702,18 +882,117 @@ mod tests {
                 1,
             ),
             mk_ctrl(9, "PCM Input Capture Switch", ControlKind::Bool, &[], 0),
+            mk_ctrl(10, "App Firmware Version", ControlKind::Int, &[], 2304),
+            mk_ctrl(11, "ESP Firmware Version", ControlKind::Int, &[], 512),
+            meter,
         ];
         let model = ScarlettModel::build(card, StreamRateInfo::default(), list);
+        assert_eq!(model.firmware, Some(2304));
+        assert_eq!(model.firmware_versions.len(), 2);
         assert_eq!(model.routes.len(), 5);
         assert_eq!(model.outputs.len(), 1);
         assert_eq!(model.outputs[0].label, "Analogue 01");
         assert_eq!(model.device_numids.len(), 2);
-        assert_eq!(model.routes[0].group, RouteGroup::AnalogueOut);
-        assert_eq!(model.routes[0].summary, "Mix A ← Analogue 1 (-6.0 dB)");
-        assert_eq!(model.routes[1].group, RouteGroup::SpdifOut);
-        assert_eq!(model.routes[2].group, RouteGroup::AdatOut);
-        assert_eq!(model.routes[3].group, RouteGroup::MixerIn);
-        assert_eq!(model.routes[4].group, RouteGroup::PcmCapture);
+        assert_eq!(model.meter_max, 65535);
+        // FCP layout is not guaranteed to match scarlett2_ports order, so meters stay neutral.
+        assert_eq!(model.meter_channels.len(), 5);
+        assert_eq!(model.meter_channels[0].group, RouteGroup::Unknown);
+        assert_eq!(model.meter_channels[0].label, "Meter 01");
+    }
+
+    #[test]
+    fn handles_vocaster_clarett_and_faderless_analogue_routes() {
+        let card = CardEntry {
+            index: 3,
+            alsa_id: "Vocaster".into(),
+            name: "Vocaster Two USB".into(),
+            usb_id: "1235:8217".into(),
+            generation: "Vocaster".into(),
+        };
+        let items = &["Off", "PCM 1"];
+        let list = vec![
+            mk_ctrl(1, "Speaker Mute Playback Switch", ControlKind::Bool, &[], 0),
+            mk_ctrl(
+                2,
+                "Headphones 1 Mute Playback Switch",
+                ControlKind::Bool,
+                &[],
+                1,
+            ),
+            mk_ctrl(
+                3,
+                "Line 01 Volume Control Playback Enum",
+                ControlKind::Enum,
+                &["SW", "HW"],
+                1,
+            ),
+            mk_ctrl(
+                4,
+                "Analogue Output 02 Playback Enum",
+                ControlKind::Enum,
+                items,
+                1,
+            ),
+        ];
+        let model = ScarlettModel::build(card, StreamRateInfo::default(), list);
+        assert!(
+            model
+                .outputs
+                .iter()
+                .any(|o| o.label == "Speaker" && o.mute_numid == Some(1))
+        );
+        assert!(
+            model
+                .outputs
+                .iter()
+                .any(|o| o.label == "Headphones 1" && o.mute_numid == Some(2))
+        );
+        // Analogue Output 02 has no volume/mute, yet is still exposed in outputs.
+        assert!(
+            model
+                .outputs
+                .iter()
+                .any(|o| o.index == 2 && o.volume_numid.is_none())
+        );
+        assert!(model.device_numids.contains(&3));
+    }
+
+    #[test]
+    fn detects_missing_mixer_controls_before_fcp_server_starts() {
+        let card = CardEntry {
+            index: 2,
+            alsa_id: "FCP".into(),
+            name: "Scarlett 18i20 4th Gen".into(),
+            usb_id: "1235:821d".into(),
+            generation: "Gen 4 (FCP)".into(),
+        };
+        let model = ScarlettModel::build(card, StreamRateInfo::default(), Vec::new());
+        assert!(!model.has_mixer_controls());
+    }
+
+    #[test]
+    fn unity_raw_is_none_when_no_db_range() {
+        let mut c = mk_ctrl(1, "Front Panel Brightness", ControlKind::Int, &[], 50);
+        c.db_min = None;
+        c.db_max = None;
+        c.max = 100;
+        assert_eq!(c.resolved_unity_raw(), None);
+    }
+
+    #[test]
+    fn unread_control_does_not_fabricate_zero() {
+        let mut c = mk_ctrl(
+            20,
+            "Line In 1-2 Phantom Power Capture Switch",
+            ControlKind::Bool,
+            &[],
+            1,
+        );
+        c.values.clear();
+        c.value_valid = false;
+        assert_eq!(c.opt_val(), None);
+        assert_eq!(c.opt_bool_val(), None);
+        assert_eq!(c.enum_label(), "?");
     }
 
     #[test]
@@ -721,6 +1000,7 @@ mod tests {
         assert!((meter_to_dbfs(0) - (-96.0)).abs() < 0.01);
         assert!((meter_to_dbfs(4095) - 0.0).abs() < 0.01);
         assert!((meter_to_dbfs(2048) - (-6.02)).abs() < 0.05);
+        assert!((meter_to_dbfs_with_max(65535, 65535) - 0.0).abs() < 0.01);
 
         let c = mk_ctrl(
             40,

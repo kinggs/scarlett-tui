@@ -48,8 +48,18 @@ jobs:
       - name: Check formatting, clippy, and Omarchy plugin safety
         run: make lint
 
-      - name: Run unit tests
+      - name: Run unit and integration tests
         run: make test
 
       - name: Build release binary
         run: make build
+
+      - name: Test staged standalone install and uninstall
+        run: |
+          STAGE="$(mktemp -d)"
+          XDG_CONFIG_HOME="$STAGE/config" make PREFIX="$STAGE" install
+          test -x "$STAGE/bin/scarlett-tui"
+          grep -q "Terminal=true" "$STAGE/share/applications/Scarlett TUI.desktop"
+          XDG_CONFIG_HOME="$STAGE/config" make PREFIX="$STAGE" uninstall
+          test ! -e "$STAGE/bin/scarlett-tui"
+          rm -rf "$STAGE"
