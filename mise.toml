@@ -1,0 +1,5 @@
+# mise installs Rust for this folder: `mise install`, once.
+# The pin is rust-toolchain.toml; this line must match it (`make check-toolchain`).
+# Kept to a bare version so fresh clones do not prompt for `mise trust`.
+[tools]
+rust = "1.100.0"

@@ -1,0 +1,37 @@
+name: Device support
+description: Report how a Scarlett, Clarett, or Vocaster model behaves on real hardware.
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping verify more Focusrite models!
+        Please omit your hardware serial number and local home paths.
+  - type: input
+    id: model
+    attributes:
+      label: Model and USB ID (`scarlett-tui --list`)
+      placeholder: "Scarlett 8i6 USB (Gen 3, USB 1235:8213)"
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Linux kernel & firmware version
+      placeholder: "Linux 7.2.15, firmware 1605"
+    validations:
+      required: true
+  - type: textarea
+    id: works
+    attributes:
+      label: What worked and what did not
+      description: Check Overview/Meters, I/O & Device switches, Routing, Mix Matrix, and the Omarchy bar plugin if used.
+    validations:
+      required: true
+  - type: textarea
+    id: dump
+    attributes:
+      label: Output of `scarlett-tui --json`
+      render: json
+    validations:
+      required: true

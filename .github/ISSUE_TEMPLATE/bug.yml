@@ -1,0 +1,50 @@
+name: Bug report
+description: Something is broken in the TUI, daemon, or Omarchy bar plugin.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One person maintains this project in spare time, so replies may be slow.
+        For security vulnerabilities, use **Security → Report a vulnerability** instead (see `SECURITY.md`).
+        Please do not paste your device serial number or local home directory paths.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where
+      options:
+        - Standalone TUI (`scarlett-tui`)
+        - Omarchy bar plugin (`Panel.qml`)
+        - ALSA discovery / controls (`--json` / `--daemon`)
+        - PipeWire Links tab
+        - Build / install / docs
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Focusrite model, USB ID, and kernel
+      placeholder: "Scarlett 4i4 3rd Gen (1235:8212), firmware 1605, Linux 7.2"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Keys pressed, commands run, or state before the bug happened.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs. actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: json_dump
+    attributes:
+      label: Output of `scarlett-tui --json` (optional)
+      description: Helps diagnose control naming or routing quirks. Contains no serial numbers.
+      render: json
+    validations:
+      required: false

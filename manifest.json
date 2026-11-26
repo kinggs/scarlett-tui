@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.kinggs.scarlett-tui",
+  "name": "Scarlett TUI",
+  "version": "0.1.0",
+  "author": "Kenny Inggs",
+  "license": "MIT",
+  "description": "Focusrite Scarlett hardware controls, live meters, routing overview, and one-click Rust TUI launcher",
+  "homepage": "https://github.com/kinggs/scarlett-tui",
+  "repository": "https://github.com/kinggs/scarlett-tui",
+  "keywords": [
+    "audio",
+    "focusrite",
+    "scarlett",
+    "alsa",
+    "tui",
+    "mixer"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Scarlett",
+    "description": "Focusrite Scarlett quick controls, live meters, and scarlett-tui launcher",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

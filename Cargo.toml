@@ -1,0 +1,24 @@
+[package]
+name = "scarlett-tui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100.0"
+description = "Terminal mixer, routing matrix, live hardware meters, and Omarchy bar plugin for Focusrite Scarlett interfaces"
+license = "MIT"
+repository = "https://github.com/kinggs/scarlett-tui"
+readme = "README.md"
+keywords = ["alsa", "audio", "focusrite", "scarlett", "tui"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+crossterm = "0.28"
+libc = "0.2"
+ratatui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

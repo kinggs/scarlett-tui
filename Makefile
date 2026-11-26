@@ -1,0 +1,76 @@
+# scarlett-tui — build, test, lint, and install targets.
+
+PREFIX      ?= $(HOME)/.local
+BINDIR      := $(PREFIX)/bin
+APPDIR      := $(PREFIX)/share/applications
+PLUGIN_ID   := io.github.kinggs.scarlett-tui
+PLUGIN_DIR  := $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/omarchy/plugins/$(PLUGIN_ID)
+
+.PHONY: all build test lint fmt-check clippy check-toolchain check-plugin install install-plugin uninstall clean
+
+all: build
+
+check-toolchain:
+	@pin_rt=$$(awk -F'"' '/^channel[[:space:]]*=/{print $$2}' rust-toolchain.toml); \
+	pin_mise=$$(awk -F'"' '/^rust[[:space:]]*=/{print $$2}' mise.toml); \
+	if [ "$$pin_rt" != "$$pin_mise" ]; then \
+	  echo "Toolchain mismatch: rust-toolchain.toml ($$pin_rt) != mise.toml ($$pin_mise)" >&2; \
+	  exit 1; \
+	fi; \
+	echo "toolchain pin ok ($$pin_rt)"
+
+build: check-toolchain
+	cargo build --release --locked
+
+test: check-toolchain check-plugin
+	cargo test --locked
+
+fmt-check:
+	cargo fmt --all -- --check
+
+clippy:
+	cargo clippy --all-targets --locked -- -D warnings
+
+lint: check-toolchain fmt-check clippy check-plugin
+
+check-plugin:
+	@bash scripts/check-plugin.sh
+
+install: build
+	install -Dm755 target/release/scarlett-tui "$(BINDIR)/scarlett-tui"
+	@mkdir -p "$(APPDIR)"
+	@printf '%s\n' \
+	  '[Desktop Entry]' \
+	  'Version=1.0' \
+	  'Name=Scarlett TUI' \
+	  'Comment=Focusrite Scarlett mixer, routing matrix, live meters, and PipeWire links' \
+	  'Exec=omarchy-launch-or-focus-tui --app-id=TUI.float scarlett-tui' \
+	  'Terminal=false' \
+	  'Type=Application' \
+	  'Icon=audio-card' \
+	  'Categories=AudioVideo;Audio;Mixer;' \
+	  'StartupNotify=true' > "$(APPDIR)/Scarlett TUI.desktop"
+	@chmod +x "$(APPDIR)/Scarlett TUI.desktop"
+	@echo "Installed $(BINDIR)/scarlett-tui and $(APPDIR)/Scarlett TUI.desktop"
+
+install-plugin: install check-plugin
+	@mkdir -p "$$(dirname "$(PLUGIN_DIR)")"
+	ln -sfn "$(CURDIR)" "$(PLUGIN_DIR)"
+	@if command -v omarchy-shell >/dev/null 2>&1; then \
+	  omarchy-shell shell rescanPlugins; \
+	  omarchy plugin enable "$(PLUGIN_ID)" --section right; \
+	fi
+	@echo "Installed Omarchy plugin $(PLUGIN_ID) -> $(PLUGIN_DIR)"
+
+uninstall:
+	@if command -v omarchy >/dev/null 2>&1; then \
+	  omarchy plugin disable "$(PLUGIN_ID)" 2>/dev/null || true; \
+	fi
+	rm -f "$(PLUGIN_DIR)" "$(BINDIR)/scarlett-tui" "$(APPDIR)/Scarlett TUI.desktop"
+	@if command -v omarchy-shell >/dev/null 2>&1; then \
+	  omarchy-shell shell rescanPlugins 2>/dev/null || true; \
+	fi
+	@echo "Uninstalled scarlett-tui binary, desktop launcher, and plugin link."
+
+clean:
+	cargo clean

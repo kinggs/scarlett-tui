@@ -1,0 +1,6 @@
+# The single Rust version this repository builds with. Stable only.
+# mise.toml beside it names the same version; `make check-toolchain` fails if they differ.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
