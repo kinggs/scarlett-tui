@@ -11,7 +11,7 @@ keywords = ["alsa", "audio", "focusrite", "scarlett", "tui"]
 categories = ["command-line-utilities", "multimedia::audio"]
 
 [dependencies]
-crossterm = "0.28"
+crossterm = "0.29"
 libc = "0.2"
 ratatui = "0.29"
 serde = { version = "1", features = ["derive"] }
