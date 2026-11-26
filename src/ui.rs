@@ -1200,11 +1200,19 @@ impl App {
             return;
         }
 
-        let rows: Vec<Row> = m
-            .routes
+        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
+        let row_start = if self.route_cursor >= visible_rows {
+            self.route_cursor + 1 - visible_rows
+        } else {
+            0
+        };
+        let shown_routes = &m.routes[row_start..(row_start + visible_rows).min(m.routes.len())];
+
+        let rows: Vec<Row> = shown_routes
             .iter()
             .enumerate()
-            .map(|(i, r)| {
+            .map(|(local_i, r)| {
+                let i = row_start + local_i;
                 let style = if i == self.route_cursor {
                     Style::default().add_modifier(Modifier::REVERSED)
                 } else {
@@ -1264,6 +1272,23 @@ impl App {
             return;
         }
 
+        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
+        let visible_cols = (area.width.saturating_sub(24).max(9) as usize / 9).max(1);
+        let row_start = if self.matrix_row >= visible_rows {
+            self.matrix_row + 1 - visible_rows
+        } else {
+            0
+        };
+        let col_start = if self.matrix_col >= visible_cols {
+            self.matrix_col + 1 - visible_cols
+        } else {
+            0
+        };
+        let shown_mixes =
+            &m.matrix.mixes[col_start..(col_start + visible_cols).min(m.matrix.mixes.len())];
+        let shown_inputs =
+            &m.matrix.inputs[row_start..(row_start + visible_rows).min(m.matrix.inputs.len())];
+
         let mut header_cells = vec![
             Cell::from("Mixer Input [Source]").style(
                 Style::default()
@@ -1271,7 +1296,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             ),
         ];
-        for &mix in &m.matrix.mixes {
+        for &mix in shown_mixes {
             // Show if this Mix is actively feeding an Analogue Output
             let used = m
                 .routes
@@ -1291,12 +1316,11 @@ impl App {
             );
         }
 
-        let rows: Vec<Row> = m
-            .matrix
-            .inputs
+        let rows: Vec<Row> = shown_inputs
             .iter()
             .enumerate()
-            .map(|(r_idx, &in_idx)| {
+            .map(|(local_r, &in_idx)| {
+                let r_idx = row_start + local_r;
                 let src = m.mixer_input_source(in_idx);
                 let row_label = format!("In {in_idx:02} [{src}]");
                 let mut cells =
@@ -1308,7 +1332,8 @@ impl App {
                         })),
                     ];
 
-                for (c_idx, &mix) in m.matrix.mixes.iter().enumerate() {
+                for (local_c, &mix) in shown_mixes.iter().enumerate() {
+                    let c_idx = col_start + local_c;
                     let selected = r_idx == self.matrix_row && c_idx == self.matrix_col;
                     let (txt, mut style) = if let Some(&cid) = m.matrix.cells.get(&(mix, in_idx))
                         && let Some(c) = m.controls.get(&cid)
@@ -1340,7 +1365,7 @@ impl App {
             .collect();
 
         let mut widths = vec![Constraint::Length(22)];
-        for _ in &m.matrix.mixes {
+        for _ in shown_mixes {
             widths.push(Constraint::Length(9));
         }
 

@@ -27,21 +27,38 @@ PipeWire software links together in one place.
 ## Status and hardware support
 
 Controls, routing tables, mix matrix dimensions, and level-meter mappings are
-discovered dynamically from `libasound` (`snd_ctl_*`), so the same binary adapts
-across Focusrite sizes and generations.
+discovered dynamically from `libasound` (`snd_ctl_*`), and were audited against
+control naming from the mainline Linux `7.2` `scarlett2`/`fcp` driver across
+Gen 2, Gen 3, Gen 4, Clarett+, and Vocaster models. However, **only the
+maintainer's own Scarlett 4i4 (3rd Gen) has been verified on physical
+hardware**.
 
 | Model family | Linux driver | Status |
 |---|---|---|
-| **Scarlett 4i4 (3rd Gen)** (`1235:8212`, fw `1605`) | `scarlett2` | **Verified on hardware** — all 5 tabs, live 18-channel meters, 6×8 matrix, Omarchy bar plugin |
-| **Scarlett Gen 2** (`6i6`, `18i8`, `18i20`) | `scarlett2` | ⚠ Supported dynamically by control discovery; not yet verified on physical hardware |
-| **Scarlett Gen 3** (`Solo`, `2i2`, `8i6`, `18i8`, `18i20`) | `scarlett2` | ⚠ Supported dynamically (`Direct Monitor` / matrix); not yet verified on physical hardware |
-| **Scarlett Gen 4** (`Solo`, `2i2`, `4i4`) | `scarlett2` | ⚠ Digital `Gain`, 3-state `Air` enum, `Clip Safe`, `Link`, and `Direct Monitor` covered by unit tests; not yet verified on physical hardware |
-| **Scarlett Gen 4 large** (`16i16`, `18i16`, `18i20`) | `fcp` | ⚠ Short FCP routing names (`Analogue 1`, `Mixer 1`) covered by unit tests; not yet verified on physical hardware |
-| **Clarett USB / Clarett+ / Vocaster** | `scarlett2` | ⚠ Detected (`1235:*`) and parsed dynamically; not yet verified on physical hardware |
+| **Scarlett 4i4 (3rd Gen)** (`1235:8212`, fw `1605`) | `scarlett2` | **Verified on physical hardware** — all 5 tabs, live 18-channel meters, 6×8 matrix, Omarchy bar plugin |
+| **Scarlett Gen 2** (`6i6`, `18i8`, `18i20`) | `scarlett2` | ⚠ Control names audited; not yet verified on physical hardware |
+| **Scarlett Gen 3** (`Solo`, `2i2`, `8i6`, `18i8`, `18i20`) | `scarlett2` | ⚠ Control names audited (`Direct Monitor` / matrix); not yet verified on physical hardware |
+| **Scarlett Gen 4** (`Solo`, `2i2`, `4i4`) | `scarlett2` | ⚠ Digital `Gain`, 3-state `Air` enum, `Clip Safe`, `Link`, `PCM Input`, `Direct Monitor` covered by unit tests; not yet verified on physical hardware |
+| **Scarlett Gen 4 large** (`16i16`, `18i16`, `18i20`) | `fcp` | ⚠ Short FCP routing names (`Analogue 1`, `Mixer 1`, `Analogue 1 Playback Volume`, scrolling matrix) covered by unit tests; not yet verified on physical hardware |
+| **Clarett USB / Clarett+ / Vocaster** | `scarlett2` | ⚠ Control names audited (`1235:*`); not yet verified on physical hardware |
+| **Scarlett Gen 1** (`6i6`, `8i6`, `18i6`, `18i8`, `18i20`) | `mixer_scarlett` | **Not supported** — uses an older, different ALSA control schema (`Master 1L`, `Matrix 01`) |
 
-Have one of the ⚠ models? Open a [Device support](https://github.com/kinggs/scarlett-tui/issues/new?template=device-support.yml)
-issue with the output of `scarlett-tui --json` (it contains no serial numbers or
-personal paths).
+### Call to action: help verify your Focusrite model (humans & agents)
+
+I only own a Scarlett 4i4 (3rd Gen), so every `⚠` row above needs real-hardware
+testing. If you (or your coding agent) have another Scarlett, Clarett, or
+Vocaster plugged into Linux, follow the two-minute, read-only, privacy-safe
+playbook in **[docs/HARDWARE-TESTING.md](docs/HARDWARE-TESTING.md)**:
+
+```sh
+scarlett-tui --list
+scarlett-tui --json    # safe to share: omits serial numbers and local paths
+```
+
+Open a [Device support](https://github.com/kinggs/scarlett-tui/issues/new?template=device-support.yml)
+issue with the JSON output and what worked, or send a PR adding a unit test for
+your model in `src/model.rs`. **Agents are first-class testers here** — point
+your agent at `AGENTS.md` and `docs/HARDWARE-TESTING.md`.
 
 ### What this does today
 

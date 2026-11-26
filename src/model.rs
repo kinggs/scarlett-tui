@@ -144,10 +144,14 @@ impl ScarlettModel {
                 continue;
             }
 
-            // Input channel controls: "Line In N ..."
+            // Input channel controls: "Line In N ..." or paired "Line In 1-2 ..."
             if let Some(rest) = name.strip_prefix("Line In ") {
                 if name.contains("Phantom Power") {
                     phantom_numids.push(ctrl.numid);
+                    continue;
+                }
+                if name.contains("Link") && rest.contains('-') {
+                    device_numids.push(ctrl.numid);
                     continue;
                 }
                 if let Some((num_str, tail)) = rest.split_once(' ')
@@ -199,7 +203,9 @@ impl ScarlettModel {
                 continue;
             }
 
-            // Output volumes & mutes: "Line 01 (Monitor L) Playback Volume" / "Line 01 Mute Playback Switch"
+            // Output volumes & mutes:
+            //   scarlett2: "Line 01 (Monitor L) Playback Volume" / "Line 01 Mute Playback Switch"
+            //   FCP Gen 4: "Analogue 1 Playback Volume"
             if let Some(rest) = name.strip_prefix("Line ")
                 && !name.starts_with("Line In ")
                 && let Some((num_str, tail)) = rest.split_once(' ')
@@ -224,6 +230,19 @@ impl ScarlettModel {
                     entry.mute_numid = Some(ctrl.numid);
                     continue;
                 }
+            } else if let Some(rest) = name.strip_prefix("Analogue ")
+                && let Some((num_str, tail)) = rest.split_once(' ')
+                && tail == "Playback Volume"
+                && let Ok(ch) = num_str.parse::<u32>()
+            {
+                let entry = output_map.entry(ch).or_insert_with(|| OutputChannel {
+                    index: ch,
+                    label: format!("Analogue {ch:02}"),
+                    volume_numid: None,
+                    mute_numid: None,
+                });
+                entry.volume_numid = Some(ctrl.numid);
+                continue;
             }
 
             // Mix Matrix cells: "Mix A Input 01 Playback Volume"
@@ -260,11 +279,18 @@ impl ScarlettModel {
                         | "Front Panel Brightness"
                         | "Front Panel Sleep Time"
                         | "Speaker Switching Playback Enum"
+                        | "Speaker Switching Alt Playback Switch"
                         | "Talkback Playback Switch"
+                        | "Talkback Enable Playback Switch"
+                        | "Talk Playback Switch"
                         | "Dim Playback Switch"
                         | "Mute Playback Switch"
                         | "Master Playback Volume"
+                        | "Master HW Playback Volume"
                         | "PCM Input Switch"
+                        | "PCM Input Capture Switch"
+                        | "Digital I/O Mode Capture Enum"
+                        | "Clock Source Clock Source"
                 )
             {
                 device_numids.push(ctrl.numid);
@@ -667,9 +693,21 @@ mod tests {
                 148,
             ), // -6.0 dB
             mk_ctrl(6, "PCM 1 Capture Enum", ControlKind::Enum, items, 1),
+            mk_ctrl(7, "Analogue 1 Playback Volume", ControlKind::Int, &[], 127),
+            mk_ctrl(
+                8,
+                "Line In 1-2 Link Capture Switch",
+                ControlKind::Bool,
+                &[],
+                1,
+            ),
+            mk_ctrl(9, "PCM Input Capture Switch", ControlKind::Bool, &[], 0),
         ];
         let model = ScarlettModel::build(card, StreamRateInfo::default(), list);
         assert_eq!(model.routes.len(), 5);
+        assert_eq!(model.outputs.len(), 1);
+        assert_eq!(model.outputs[0].label, "Analogue 01");
+        assert_eq!(model.device_numids.len(), 2);
         assert_eq!(model.routes[0].group, RouteGroup::AnalogueOut);
         assert_eq!(model.routes[0].summary, "Mix A ← Analogue 1 (-6.0 dB)");
         assert_eq!(model.routes[1].group, RouteGroup::SpdifOut);

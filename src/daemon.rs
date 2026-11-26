@@ -162,15 +162,15 @@ fn build_snapshot(model: &ScarlettModel) -> SnapshotPayload<'_> {
         .filter_map(|&id| {
             let c = model.controls.get(&id)?;
             let short = if c.name.contains("Persistence") {
-                "Remember 48V"
-            } else if c.name.contains("1-2") {
-                "48V (In 1–2)"
-            } else if c.name.contains("3-4") {
-                "48V (In 3–4)"
+                "Remember 48V".to_string()
+            } else if let Some(rest) = c.name.strip_prefix("Line In ")
+                && let Some(ch_range) = rest.split_whitespace().next()
+            {
+                format!("48V (In {})", ch_range.replace('-', "–"))
             } else {
-                "48V Phantom"
+                "48V Phantom".to_string()
             };
-            toggle_from(model, id, short)
+            toggle_from(model, id, &short)
         })
         .collect();
 

@@ -24,6 +24,7 @@ backend that `Panel.qml` talks to over JSON-lines.
 | `manifest.json` | Omarchy plugin manifest (`id: io.github.kinggs.scarlett-tui`) at repo root for marketplace compatibility |
 | `Panel.qml` | Omarchy bar widget + `KeyboardPanel` popup using `qs.Ui` and `qs.Commons` |
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |
+| `docs/HARDWARE-TESTING.md` | Agent-first, read-only playbook for verifying new Scarlett / Clarett / Vocaster hardware and submitting fixture PRs |
 | `Makefile` | `build`, `test`, `lint`, `check-toolchain`, `check-plugin`, `install`, `install-plugin`, `uninstall` |
 
 ## Invariants — do not break these
