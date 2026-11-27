@@ -1243,6 +1243,10 @@ impl App {
 
     fn render(&self, f: &mut Frame) {
         let area = f.area();
+        if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
+            render_too_small(f, area);
+            return;
+        }
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -1281,12 +1285,11 @@ impl App {
                 .active_rate
                 .map(|r| format!("{:.1} kHz", r as f64 / 1000.0))
                 .unwrap_or_else(|| "Idle".into());
-            let sync_color = if !m.has_mixer_controls() {
-                Color::Red
-            } else if m.is_locked() {
-                Color::Green
+            // Locked is green ●; unlocked or mixer unavailable is caution ▲ (docs/DESIGN.md).
+            let (sync_glyph, sync_color) = if m.has_mixer_controls() && m.is_locked() {
+                ("●", Color::Green)
             } else {
-                Color::Yellow
+                ("▲", Color::Yellow)
             };
             let sync_label = if !m.has_mixer_controls() && m.sync_status == "Unknown" {
                 "Mixer unavailable".to_string()
@@ -1298,45 +1301,57 @@ impl App {
                 .map(|v| format!("FW {v}"))
                 .unwrap_or_else(|| "FW ?".into());
             let pw_count = self.pw_links.iter().filter(|l| l.is_scarlett).count();
-            let mut spans = Vec::new();
+
+            // Priority order, left to right: sync · rate · 48V · model · USB/FW.
+            // Segments that do not fit are dropped from the right; USB and FW
+            // only show at 120+ columns (they are in the ? overlay's About block).
+            let mut segs: Vec<Vec<Span<'static>>> = vec![
+                vec![Span::styled(
+                    format!(" {sync_glyph} {sync_label}"),
+                    Style::default().fg(sync_color).add_modifier(Modifier::BOLD),
+                )],
+                vec![Span::styled(
+                    format!("  {rate_str}"),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )],
+            ];
             if m.phantom_live() {
-                spans.push(Span::styled(" 48V ", badge(Color::Red)));
-                spans.push(Span::raw(" "));
+                segs.push(vec![
+                    Span::raw("  "),
+                    Span::styled(" 48V ", badge(Color::Red)),
+                ]);
             }
-            spans.extend([
+            segs.push(vec![
+                Span::raw("  "),
                 Span::styled(
-                    format!(" {} ", m.card.name),
+                    m.card.name.clone(),
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("({})  ", m.card.generation),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(format!("USB {}  ", m.card.usb_id), secondary()),
-                Span::styled(format!("{fw}  "), secondary()),
-                Span::styled(
-                    format!("● {sync_label}  "),
-                    Style::default().fg(sync_color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{rate_str}  "), Style::default().fg(Color::Cyan)),
-                Span::styled(
-                    format!("PW links: {pw_count}"),
-                    if pw_count > 0 {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        secondary()
-                    },
-                ),
+                Span::styled(format!(" · {}", m.card.generation), secondary()),
             ]);
-            Line::from(spans)
+            if area.width >= 120 {
+                segs.push(vec![Span::styled(
+                    format!("  USB {}  {fw}", m.card.usb_id),
+                    secondary(),
+                )]);
+            }
+            let pw = Span::styled(
+                format!("PW {pw_count} "),
+                if pw_count > 0 {
+                    Style::default()
+                } else {
+                    secondary()
+                },
+            );
+            fit_header(segs, pw, area.width.saturating_sub(2) as usize)
         } else if let Some(req) = self.card_override {
             Line::from(Span::styled(
-                format!(" Focusrite card {req} not connected (press r to rescan)"),
+                format!(" ✕ Focusrite card {req} not connected · r rescan"),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ))
         } else {
             Line::from(Span::styled(
-                " No Focusrite Scarlett connected (press r to rescan)",
+                " ✕ No Focusrite Scarlett connected · r rescan",
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ))
         };
@@ -1390,10 +1405,19 @@ impl App {
             return;
         }
 
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .split(area);
+        // Under 120 columns the meters stack full-width above the summary, so
+        // bars stay long enough to read −6 vs −12 (docs/DESIGN.md "Layout").
+        let cols = if area.width < 120 {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(area)
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+                .split(area)
+        };
 
         // Left: Live Hardware Level Meters
         let bar_width = cols[0].width.saturating_sub(36).max(8) as usize;
@@ -2309,6 +2333,57 @@ fn hint_line(hints: &[(&str, &str)], with_help: bool, width: usize) -> Line<'sta
     Line::from(spans)
 }
 
+/// Smallest terminal the layout supports (Kenny's ruling: design for 95×30,
+/// show a message under 80×24).
+const MIN_WIDTH: u16 = 80;
+const MIN_HEIGHT: u16 = 24;
+
+fn render_too_small(f: &mut Frame, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "Terminal too small",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!(
+            "{}×{} now; scarlett-tui needs at least {MIN_WIDTH}×{MIN_HEIGHT}.",
+            area.width, area.height
+        )),
+        Line::from(Span::styled(
+            "Enlarge the window, or press q to quit.",
+            secondary(),
+        )),
+    ];
+    let h = (lines.len() as u16).min(area.height);
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    let rect = Rect::new(area.x, y, area.width, h);
+    f.render_widget(
+        Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+        rect,
+    );
+}
+
+/// Join header segments in priority order, dropping whatever does not fit,
+/// and right-align `right` (the PipeWire link count) when there is room.
+fn fit_header(segs: Vec<Vec<Span<'static>>>, right: Span<'static>, width: usize) -> Line<'static> {
+    let span_w = |s: &Span| s.content.chars().count();
+    let right_w = span_w(&right);
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut used = 0;
+    for seg in segs {
+        let w: usize = seg.iter().map(span_w).sum();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        out.extend(seg);
+    }
+    if used + 2 + right_w <= width {
+        out.push(Span::raw(" ".repeat(width - used - right_w)));
+        out.push(right);
+    }
+    Line::from(out)
+}
+
 /// Rows moved by PgUp / PgDn in the matrix.
 const MATRIX_PAGE: usize = 10;
 
@@ -2556,7 +2631,9 @@ mod tests {
             .values = vec![1];
         let buf = render_to_buffer(&app, 95, 30);
         let row = row_text(&buf, 1);
-        let x = row.find("48V").expect("header badge") as u16;
+        let x = row[..row.find("48V").expect("header badge")]
+            .chars()
+            .count() as u16;
         let cell = &buf[(x, 1)];
         assert_eq!(cell.fg, Color::Red);
         assert!(cell.modifier.contains(Modifier::REVERSED));
@@ -2567,7 +2644,7 @@ mod tests {
         let mut app = App::for_test(Some(model_4i4()));
         for tab in Tab::ALL {
             app.tab = tab;
-            for w in [60, 80, 95, 160] {
+            for w in [80, 95, 160] {
                 let buf = render_to_buffer(&app, w, 30);
                 let hints = row_text(&buf, 29);
                 assert!(
@@ -2639,6 +2716,77 @@ mod tests {
         // and not be swallowed as a global key.
         press(&mut app, KeyCode::Char('L'));
         assert_eq!(app.tab, Tab::IoDevice);
+    }
+
+    #[test]
+    fn too_small_message_below_80_by_24_only() {
+        let app = App::for_test(Some(model_4i4()));
+        for (w, h) in [(79, 24), (80, 23), (40, 10)] {
+            let buf = render_to_buffer(&app, w, h);
+            let screen: String = (0..h).map(|y| row_text(&buf, y)).collect();
+            assert!(screen.contains("Terminal too small"), "{w}x{h}");
+        }
+        let buf = render_to_buffer(&app, 80, 24);
+        let screen: String = (0..24).map(|y| row_text(&buf, y)).collect();
+        assert!(!screen.contains("Terminal too small"));
+    }
+
+    #[test]
+    fn header_keeps_priority_items_and_drops_usb_when_narrow() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&20)
+            .unwrap()
+            .values = vec![1];
+        let narrow = row_text(&render_to_buffer(&app, 95, 30), 1);
+        let (sync, rate, v48, model) = (
+            narrow.find("● Locked").expect("sync"),
+            narrow.find("Idle").expect("rate"),
+            narrow.find("48V").expect("48V badge"),
+            narrow.find("Scarlett 4i4").expect("model"),
+        );
+        assert!(sync < rate && rate < v48 && v48 < model, "{narrow:?}");
+        assert!(!narrow.contains("USB 1235"), "{narrow:?}");
+        assert!(
+            narrow
+                .trim_end()
+                .trim_end_matches('│')
+                .trim_end()
+                .ends_with("PW 0")
+        );
+        let wide = row_text(&render_to_buffer(&app, 160, 36), 1);
+        assert!(wide.contains("USB 1235:8212"), "{wide:?}");
+    }
+
+    #[test]
+    fn fit_header_drops_from_the_right() {
+        let segs = vec![
+            vec![Span::raw("aaaa")],
+            vec![Span::raw("bbbb")],
+            vec![Span::raw("cccc")],
+        ];
+        let line = fit_header(segs, Span::raw("PW"), 9);
+        let text: String = line.spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "aaaabbbb");
+    }
+
+    #[test]
+    fn overview_stacks_meters_above_summary_under_120_columns() {
+        let app = App::for_test(Some(model_4i4()));
+        let find_row = |buf: &Buffer, h: u16, needle: &str| {
+            (0..h).find(|&y| row_text(buf, y).contains(needle))
+        };
+        let buf = render_to_buffer(&app, 95, 30);
+        let meters = find_row(&buf, 30, "Live Hardware Meters").unwrap();
+        let summary = find_row(&buf, 30, "Status & Signal Path").unwrap();
+        assert!(meters < summary, "stacked at 95 columns");
+        let buf = render_to_buffer(&app, 160, 36);
+        let meters = find_row(&buf, 36, "Live Hardware Meters").unwrap();
+        let summary = find_row(&buf, 36, "Status & Signal Path").unwrap();
+        assert_eq!(meters, summary, "side by side at 160 columns");
     }
 
     #[test]
