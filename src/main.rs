@@ -1,5 +1,6 @@
 mod alsa_ctl;
 mod daemon;
+mod keys;
 mod model;
 mod pipewire;
 mod ui;

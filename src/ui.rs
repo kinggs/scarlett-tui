@@ -1,6 +1,7 @@
 use crate::alsa_ctl::{
     AlsaCard, AlsaControl, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
 };
+use crate::keys::{self, Action, Scope};
 use crate::model::{RouteGroup, ScarlettModel, UnityJump, meter_to_dbfs_with_max, unity_jump};
 use crate::pipewire::{self, PwLink};
 use crossterm::{
@@ -23,7 +24,7 @@ use std::collections::HashMap;
 use std::io;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Tab {
     Overview = 0,
     IoDevice = 1,
@@ -40,6 +41,16 @@ impl Tab {
         Tab::Matrix,
         Tab::PipeWire,
     ];
+
+    fn scope(self) -> Scope {
+        match self {
+            Tab::Overview => Scope::Overview,
+            Tab::IoDevice => Scope::Io,
+            Tab::Routing => Scope::Routing,
+            Tab::Matrix => Scope::Matrix,
+            Tab::PipeWire => Scope::PipeWire,
+        }
+    }
 
     fn title(self) -> &'static str {
         match self {
@@ -156,6 +167,7 @@ pub struct App {
     route_cursor: usize,
     route_picker: Option<RoutePicker>,
     armed: Option<Armed>,
+    show_help: bool,
     matrix_row: usize,
     matrix_col: usize,
     matrix_prev_levels: HashMap<(char, u32), i64>,
@@ -192,6 +204,7 @@ impl App {
             route_cursor: 0,
             route_picker: None,
             armed: None,
+            show_help: false,
             matrix_row: 0,
             matrix_col: 0,
             matrix_prev_levels: HashMap::new(),
@@ -228,6 +241,7 @@ impl App {
             route_cursor: 0,
             route_picker: None,
             armed: None,
+            show_help: false,
             matrix_row: 0,
             matrix_col: 0,
             matrix_prev_levels: HashMap::new(),
@@ -727,21 +741,28 @@ impl App {
             }
         }
 
+        if self.show_help {
+            if keys::lookup(Scope::Help, code) == Some(Action::Cancel) {
+                self.show_help = false;
+            }
+            return;
+        }
+
         // Route picker modal intercepts keys
         if let Some(mut picker) = self.route_picker.take() {
-            match code {
-                KeyCode::Esc | KeyCode::Char('q') => {}
-                KeyCode::Up | KeyCode::Char('k') => {
+            match keys::lookup(Scope::Picker, code) {
+                Some(Action::Cancel) => {}
+                Some(Action::Up) => {
                     picker.selected = picker.selected.saturating_sub(1);
                     self.route_picker = Some(picker);
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                Some(Action::Down) => {
                     if picker.selected + 1 < picker.items.len() {
                         picker.selected += 1;
                     }
                     self.route_picker = Some(picker);
                 }
-                KeyCode::Enter | KeyCode::Char(' ') => {
+                Some(Action::Confirm) => {
                     let valid_gen = picker.generation == self.generation
                         && self
                             .model
@@ -770,53 +791,36 @@ impl App {
             return;
         }
 
-        match code {
-            KeyCode::Char('q') => {
+        let Some(action) = keys::lookup(self.tab.scope(), code) else {
+            return;
+        };
+        match action {
+            Action::Quit => {
                 self.should_quit = true;
                 return;
             }
-            KeyCode::Char('1') => {
-                self.tab = Tab::Overview;
+            Action::GoTab(n) => {
+                self.go_tab(Tab::ALL[n.min(Tab::ALL.len() - 1)]);
                 return;
             }
-            KeyCode::Char('2') => {
-                self.tab = Tab::IoDevice;
+            Action::NextTab => {
+                self.go_tab(Tab::ALL[(self.tab as usize + 1) % Tab::ALL.len()]);
                 return;
             }
-            KeyCode::Char('3') => {
-                self.tab = Tab::Routing;
-                return;
-            }
-            KeyCode::Char('4') => {
-                self.tab = Tab::Matrix;
-                return;
-            }
-            KeyCode::Char('5') => {
-                self.tab = Tab::PipeWire;
-                self.refresh_pipewire();
-                return;
-            }
-            KeyCode::Tab => {
-                let next = (self.tab as usize + 1) % Tab::ALL.len();
-                self.tab = Tab::ALL[next];
-                if self.tab == Tab::PipeWire {
-                    self.refresh_pipewire();
-                }
-                return;
-            }
-            KeyCode::BackTab => {
+            Action::PrevTab => {
                 let prev = (self.tab as usize + Tab::ALL.len() - 1) % Tab::ALL.len();
-                self.tab = Tab::ALL[prev];
-                if self.tab == Tab::PipeWire {
-                    self.refresh_pipewire();
-                }
+                self.go_tab(Tab::ALL[prev]);
                 return;
             }
-            KeyCode::Char('r') => {
+            Action::Rescan => {
                 self.refresh_all();
                 return;
             }
-            KeyCode::Char('c') if self.cards.len() > 1 && self.card_override.is_none() => {
+            Action::Help => {
+                self.show_help = true;
+                return;
+            }
+            Action::SwitchCard if self.cards.len() > 1 && self.card_override.is_none() => {
                 let cur_pos = self
                     .current_card_index
                     .and_then(|idx| self.cards.iter().position(|c| c.index == idx))
@@ -835,14 +839,26 @@ impl App {
 
         match self.tab {
             Tab::Overview => {}
-            Tab::IoDevice => self.handle_io_key(code),
-            Tab::Routing => self.handle_routing_key(code),
-            Tab::Matrix => self.handle_matrix_key(code),
-            Tab::PipeWire => self.handle_pw_key(code),
+            Tab::IoDevice => self.handle_io_key(action),
+            Tab::Routing => self.handle_routing_key(action),
+            Tab::Matrix => self.handle_matrix_key(action),
+            Tab::PipeWire => self.handle_pw_key(action),
         }
     }
 
-    fn handle_io_key(&mut self, code: KeyCode) {
+    fn go_tab(&mut self, tab: Tab) {
+        self.tab = tab;
+        if tab == Tab::PipeWire {
+            self.refresh_pipewire();
+        }
+    }
+
+    fn handle_io_key(&mut self, action: Action) {
+        let step_db = if matches!(action, Action::IncBig | Action::DecBig) {
+            6.0
+        } else {
+            1.0
+        };
         let items = self.io_items();
         if items.is_empty() {
             return;
@@ -864,16 +880,16 @@ impl App {
             .as_ref()
             .is_some_and(|m| m.is_phantom_switch(item.numid));
 
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
+        match action {
+            Action::Up => {
                 self.io_cursor = self.io_cursor.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            Action::Down => {
                 if self.io_cursor + 1 < items.len() {
                     self.io_cursor += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            Action::Toggle => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -902,11 +918,11 @@ impl App {
                     }
                     ControlKind::Int => {
                         // Do not jump integer gain controls on Enter/Space — use h/l or 0.
-                        self.set_status("Use h/l (+/-) to adjust, 0 for 0 dB unity, m for min");
+                        self.set_status("Use h/l (±1 dB), H/L (±6 dB), 0 for unity, m to mute");
                     }
                 }
             }
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Char('+') | KeyCode::Char('=') => {
+            Action::Inc | Action::IncBig => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -932,10 +948,10 @@ impl App {
                         let next = self
                             .alsa
                             .as_ref()
-                            .and_then(|a| a.step_db(&ctrl, 1.0))
+                            .and_then(|a| a.step_db(&ctrl, step_db))
                             .or_else(|| {
                                 let cur = ctrl.opt_val()?;
-                                let step = ((ctrl.max - ctrl.min) / 64).max(1);
+                                let step = ((ctrl.max - ctrl.min) / 64).max(1) * step_db as i64;
                                 Some((cur + step).min(ctrl.max))
                             });
                         if let Some(v) = next {
@@ -944,7 +960,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') | KeyCode::Char('-') => {
+            Action::Dec | Action::DecBig => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -962,10 +978,10 @@ impl App {
                         let next = self
                             .alsa
                             .as_ref()
-                            .and_then(|a| a.step_db(&ctrl, -1.0))
+                            .and_then(|a| a.step_db(&ctrl, -step_db))
                             .or_else(|| {
                                 let cur = ctrl.opt_val()?;
-                                let step = ((ctrl.max - ctrl.min) / 64).max(1);
+                                let step = ((ctrl.max - ctrl.min) / 64).max(1) * step_db as i64;
                                 Some((cur - step).max(ctrl.min))
                             });
                         if let Some(v) = next {
@@ -974,7 +990,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('0') if ctrl.kind == ControlKind::Int => {
+            Action::Unity if ctrl.kind == ControlKind::Int => {
                 if let Some(unity) = self
                     .model
                     .as_ref()
@@ -985,14 +1001,30 @@ impl App {
                     self.set_status(format!("No 0 dB reference for {}", item.label));
                 }
             }
-            KeyCode::Char('m') if ctrl.kind == ControlKind::Int => {
-                self.write_control(ctrl.numid, ctrl.min);
+            Action::Mute if ctrl.kind == ControlKind::Int => {
+                // On an output volume row, m toggles that output's mute switch.
+                let mute = self.model.as_ref().and_then(|m| {
+                    let out = m
+                        .outputs
+                        .iter()
+                        .find(|o| o.volume_numid == Some(ctrl.numid))?;
+                    let id = out.mute_numid?;
+                    Some((id, m.controls.get(&id)?.opt_bool_val()?, out.label.clone()))
+                });
+                if let Some((id, muted, label)) = mute {
+                    if self.write_control(id, if muted { 0 } else { 1 }) {
+                        let word = if muted { "unmuted" } else { "muted" };
+                        self.set_status(format!("{label} {word}"));
+                    }
+                } else {
+                    self.write_control(ctrl.numid, ctrl.min);
+                }
             }
             _ => {}
         }
     }
 
-    fn handle_routing_key(&mut self, code: KeyCode) {
+    fn handle_routing_key(&mut self, action: Action) {
         let Some(ref model) = self.model else { return };
         if model.routes.is_empty() {
             return;
@@ -1008,16 +1040,16 @@ impl App {
             return;
         };
 
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
+        match action {
+            Action::Up => {
                 self.route_cursor = self.route_cursor.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            Action::Down => {
                 if self.route_cursor + 1 < model.routes.len() {
                     self.route_cursor += 1;
                 }
             }
-            KeyCode::Enter | KeyCode::Char(' ') => {
+            Action::Toggle => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1031,7 +1063,7 @@ impl App {
                     selected: ctrl.val().max(0) as usize,
                 });
             }
-            KeyCode::Right | KeyCode::Char('l') => {
+            Action::Right => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1043,7 +1075,7 @@ impl App {
                     self.write_control(numid, next);
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
+            Action::Left => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1056,14 +1088,14 @@ impl App {
                     self.write_control(numid, prev);
                 }
             }
-            KeyCode::Char('x') | KeyCode::Char('0') if self.write_control(numid, 0) => {
+            Action::Off if self.write_control(numid, 0) => {
                 self.set_status(format!("{title} → Off"));
             }
             _ => {}
         }
     }
 
-    fn handle_matrix_key(&mut self, code: KeyCode) {
+    fn handle_matrix_key(&mut self, action: Action) {
         let Some(ref model) = self.model else { return };
         if model.matrix.is_empty() {
             return;
@@ -1079,22 +1111,20 @@ impl App {
         let cell_ctrl = cell_id.and_then(|id| model.controls.get(&id)).cloned();
         let unity_opt = cell_id.and_then(|id| model.unity_raw_for(id));
 
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => self.matrix_row = self.matrix_row.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => {
+        match action {
+            Action::Up => self.matrix_row = self.matrix_row.saturating_sub(1),
+            Action::Down => {
                 if self.matrix_row + 1 < n_rows {
                     self.matrix_row += 1;
                 }
             }
-            KeyCode::Left | KeyCode::Char('h') => {
-                self.matrix_col = self.matrix_col.saturating_sub(1)
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
+            Action::Left => self.matrix_col = self.matrix_col.saturating_sub(1),
+            Action::Right => {
                 if self.matrix_col + 1 < n_cols {
                     self.matrix_col += 1;
                 }
             }
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char(']') => {
+            Action::Inc => {
                 if let Some(ref c) = cell_ctrl
                     && let Some(v) = self
                         .alsa
@@ -1105,7 +1135,7 @@ impl App {
                     self.write_control(c.numid, v);
                 }
             }
-            KeyCode::Char('-') | KeyCode::Char('[') => {
+            Action::Dec => {
                 if let Some(ref c) = cell_ctrl
                     && let Some(v) = self
                         .alsa
@@ -1116,7 +1146,7 @@ impl App {
                     self.write_control(c.numid, v);
                 }
             }
-            KeyCode::Char('}') => {
+            Action::IncBig => {
                 if let Some(ref c) = cell_ctrl
                     && let Some(v) = self
                         .alsa
@@ -1127,7 +1157,7 @@ impl App {
                     self.write_control(c.numid, v);
                 }
             }
-            KeyCode::Char('{') => {
+            Action::DecBig => {
                 if let Some(ref c) = cell_ctrl
                     && let Some(v) = self
                         .alsa
@@ -1138,7 +1168,11 @@ impl App {
                     self.write_control(c.numid, v);
                 }
             }
-            KeyCode::Char('0') => {
+            Action::PageUp => self.matrix_row = self.matrix_row.saturating_sub(MATRIX_PAGE),
+            Action::PageDown => self.matrix_row = (self.matrix_row + MATRIX_PAGE).min(n_rows - 1),
+            Action::First => self.matrix_col = 0,
+            Action::Last => self.matrix_col = n_cols - 1,
+            Action::Unity => {
                 if let Some(ref c) = cell_ctrl {
                     if let Some(unity) = unity_opt {
                         self.unity_or_arm(c, unity, format!("Mix {mix} In {input:02}"));
@@ -1147,7 +1181,7 @@ impl App {
                     }
                 }
             }
-            KeyCode::Char('m') | KeyCode::Char('x') | KeyCode::Enter | KeyCode::Char(' ') => {
+            Action::Mute => {
                 if let Some(ref c) = cell_ctrl
                     && let Some(cur) = c.opt_val()
                 {
@@ -1170,22 +1204,22 @@ impl App {
         }
     }
 
-    fn handle_pw_key(&mut self, code: KeyCode) {
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => {
+    fn handle_pw_key(&mut self, action: Action) {
+        match action {
+            Action::Up => {
                 self.pw_cursor = self.pw_cursor.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            Action::Down => {
                 let len = self.visible_pw_links().len();
                 if self.pw_cursor + 1 < len {
                     self.pw_cursor += 1;
                 }
             }
-            KeyCode::Char('a') => {
+            Action::ShowAll => {
                 self.pw_show_all = !self.pw_show_all;
                 self.pw_cursor = 0;
             }
-            KeyCode::Char('d') | KeyCode::Delete => {
+            Action::Disconnect => {
                 let link_info = self.visible_pw_links().get(self.pw_cursor).map(|l| {
                     (
                         l.id,
@@ -1234,6 +1268,9 @@ impl App {
 
         if let Some(ref picker) = self.route_picker {
             self.render_route_picker(f, area, picker);
+        }
+        if self.show_help {
+            self.render_help(f, area);
         }
     }
 
@@ -1718,13 +1755,16 @@ impl App {
             ],
         )
         .header(
-            Row::new(["Section", "Control", "Value"])
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Row::new(["Section", "Control", "Value"]).style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Inputs, Outputs & Device Switches (Space toggle · h/l adjust · 0 unity · m min) ")
+                .title(" I/O & Device ")
                 .border_style(decoration())
                 .title_style(title_style()),
         );
@@ -1794,7 +1834,7 @@ impl App {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Hardware Routing Matrix (Enter pick source · h/l cycle · x Off) ")
+                .title(" Hardware routing ")
                 .border_style(decoration())
                 .title_style(title_style()),
         );
@@ -1906,9 +1946,9 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Mix Matrix (dB · * = routed to output · +/- ±1dB · {/} ±6dB · 0 unity · m/Space mute) ")
+                    .title(" Mix matrix (dB · * = routed to an output) ")
                     .border_style(decoration())
-                .title_style(title_style()),
+                    .title_style(title_style()),
             );
         f.render_widget(table, area);
     }
@@ -1916,9 +1956,9 @@ impl App {
     fn render_pipewire(&self, f: &mut Frame, area: Rect) {
         let links = self.visible_pw_links();
         let title = if self.pw_show_all {
-            " PipeWire Links — ALL (a: Scarlett only · d: disconnect · r: refresh) "
+            " PipeWire links — all "
         } else {
-            " PipeWire Links — Scarlett (a: show all · d: disconnect · r: refresh) "
+            " PipeWire links — Scarlett "
         };
 
         if links.is_empty() {
@@ -2043,26 +2083,162 @@ impl App {
             f.render_widget(Paragraph::new(vec![prompt, hint]), area);
             return;
         }
-        let msg =
+        let width = area.width as usize;
+        let status =
             if !self.status_msg.is_empty() && self.status_at.elapsed() < Duration::from_secs(5) {
-                Span::styled(
-                    format!(" {} ", self.status_msg),
-                    Style::default().fg(Color::Yellow),
-                )
+                self.status_msg.as_str()
             } else {
-                let multi = if self.cards.len() > 1 && self.card_override.is_none() {
-                    " · c switch card"
-                } else {
-                    ""
-                };
-                Span::styled(
-                    format!(
-                        " 1-5 / Tab switch view · hjkl/arrows navigate · r refresh{multi} · q quit "
-                    ),
-                    secondary(),
-                )
+                ""
             };
-        f.render_widget(Paragraph::new(Line::from(msg)), area);
+        let scope = if self.show_help {
+            Scope::Help
+        } else if self.route_picker.is_some() {
+            Scope::Picker
+        } else {
+            self.tab.scope()
+        };
+        let rows = vec![
+            status_line(status, &self.selection_context(), width),
+            hint_line(&keys::hints(scope), scope != Scope::Help, width),
+        ];
+        f.render_widget(Paragraph::new(rows), area);
+    }
+
+    /// What the cursor is on, for the right of footer row 1.
+    fn selection_context(&self) -> String {
+        let Some(ref m) = self.model else {
+            return String::new();
+        };
+        match self.tab {
+            Tab::Overview => String::new(),
+            Tab::IoDevice => self
+                .io_items()
+                .get(self.io_cursor)
+                .map(|i| i.label.clone())
+                .unwrap_or_default(),
+            Tab::Routing => m
+                .routes
+                .get(self.route_cursor)
+                .map(|r| format!("{} ← {}", r.label, r.current))
+                .unwrap_or_default(),
+            Tab::Matrix => {
+                match (
+                    m.matrix.mixes.get(self.matrix_col),
+                    m.matrix.inputs.get(self.matrix_row),
+                ) {
+                    (Some(mix), Some(&input)) => format!(
+                        "Mix {mix} · In {input:02} [{}]",
+                        m.mixer_input_source(input)
+                    ),
+                    _ => String::new(),
+                }
+            }
+            Tab::PipeWire => self
+                .visible_pw_links()
+                .get(self.pw_cursor)
+                .map(|l| format!("link #{}", l.id))
+                .unwrap_or_default(),
+        }
+    }
+
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let scope = self.tab.scope();
+        let entry = |b: &keys::Binding| {
+            Line::from(vec![
+                Span::styled(
+                    format!(" {:<12}", b.label),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(b.help),
+            ])
+        };
+        let heading = |t: &str| {
+            Line::from(Span::styled(
+                format!(" {t}"),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        };
+
+        let mut left = vec![heading("This tab")];
+        let own: Vec<Line> = keys::bindings(scope).map(entry).collect();
+        if own.is_empty() {
+            left.push(Line::from(Span::styled(
+                " No keys of its own; see Everywhere",
+                secondary(),
+            )));
+        } else {
+            left.extend(own);
+        }
+        left.push(Line::from(""));
+        left.push(heading("Safety"));
+        left.extend(keys::bindings(Scope::Safety).map(entry));
+
+        let mut right = vec![heading("Everywhere")];
+        right.extend(keys::bindings(Scope::Global).map(entry));
+        right.push(Line::from(""));
+        right.push(heading("About"));
+        let about = |k: &str, v: String| {
+            Line::from(vec![
+                Span::styled(format!(" {k:<7}"), secondary()),
+                Span::raw(v),
+            ])
+        };
+        if let Some(ref m) = self.model {
+            right.push(about(
+                "Model",
+                format!("{} {}", m.card.name, m.card.generation),
+            ));
+            right.push(about("USB", m.card.usb_id.clone()));
+            right.push(about(
+                "FW",
+                m.firmware
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".into()),
+            ));
+            right.push(about(
+                "Card",
+                format!("hw:{} · {} found", m.card.index, self.cards.len().max(1)),
+            ));
+        } else {
+            right.push(Line::from(Span::styled(" No device", secondary())));
+        }
+
+        let body_h = left.len().max(right.len()) as u16;
+        let w = 86.min(area.width.saturating_sub(2));
+        let h = (body_h + 4).min(area.height.saturating_sub(2));
+        let rect = Rect::new(
+            area.x + area.width.saturating_sub(w) / 2,
+            area.y + area.height.saturating_sub(h) / 2,
+            w,
+            h,
+        );
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title_style(title_style().add_modifier(Modifier::BOLD))
+            .title(format!(" Keys · {} ", self.tab.title()));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner);
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(parts[0]);
+        f.render_widget(Paragraph::new(left), cols[0]);
+        f.render_widget(Paragraph::new(right), cols[1]);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " Generated from the keymap the app uses, so this list cannot drift.",
+                secondary(),
+            ))),
+            parts[1],
+        );
     }
 }
 
@@ -2090,6 +2266,51 @@ fn badge(color: Color) -> Style {
 fn title_style() -> Style {
     Style::default().fg(Color::Reset)
 }
+
+/// Footer row 1: transient status on the left, selection context on the right.
+fn status_line(status: &str, context: &str, width: usize) -> Line<'static> {
+    let ctx = truncate(context, width / 2);
+    let room = width.saturating_sub(ctx.chars().count() + 2);
+    let left = truncate(status, room.saturating_sub(1));
+    let pad = width.saturating_sub(left.chars().count() + 1 + ctx.chars().count() + 1);
+    Line::from(vec![
+        Span::raw(format!(" {left}")),
+        Span::raw(" ".repeat(pad)),
+        Span::styled(format!("{ctx} "), secondary()),
+    ])
+}
+
+/// Footer row 2: as many hints as fit, highest value first, then `? help`.
+fn hint_line(hints: &[(&str, &str)], with_help: bool, width: usize) -> Line<'static> {
+    let help_len = if with_help { " ? help".len() } else { 0 };
+    let mut spans = Vec::new();
+    let mut used = 0;
+    for (key, word) in hints {
+        let len = 1 + key.chars().count() + 1 + word.chars().count() + 1;
+        if used + len + help_len > width {
+            break;
+        }
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            key.to_string(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(format!(" {word} "), secondary()));
+        used += len;
+    }
+    if with_help {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            "?",
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(" help", secondary()));
+    }
+    Line::from(spans)
+}
+
+/// Rows moved by PgUp / PgDn in the matrix.
+const MATRIX_PAGE: usize = 10;
 
 fn window_start(cursor: usize, total: usize, visible: usize) -> usize {
     if total == 0 || visible == 0 {
@@ -2191,13 +2412,19 @@ mod tests {
     fn footer_hints_are_dim_default_foreground() {
         let app = App::for_test(Some(model_4i4()));
         let buf = render_to_buffer(&app, 95, 30);
-        let y = 28;
+        let y = 29;
         let row: String = (0..95).map(|x| buf[(x, y)].symbol().to_string()).collect();
-        assert!(row.contains("q quit"), "footer row was {row:?}");
-        let x = row.find('q').unwrap() as u16;
-        let cell = &buf[(x, y)];
-        assert_eq!(cell.fg, Color::Reset);
-        assert!(cell.modifier.contains(Modifier::DIM));
+        let byte = row
+            .find("q quit")
+            .unwrap_or_else(|| panic!("footer row was {row:?}"));
+        let x = row[..byte].chars().count() as u16;
+        // The key is bold default foreground; its word is dimmed default foreground.
+        let key = &buf[(x, y)];
+        assert_eq!(key.fg, Color::Reset);
+        assert!(key.modifier.contains(Modifier::BOLD));
+        let word = &buf[(x + 2, y)];
+        assert_eq!(word.fg, Color::Reset);
+        assert!(word.modifier.contains(Modifier::DIM));
     }
 
     fn row_text(buf: &Buffer, y: u16) -> String {
@@ -2333,6 +2560,85 @@ mod tests {
         let cell = &buf[(x, 1)];
         assert_eq!(cell.fg, Color::Red);
         assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn footer_ends_with_help_at_every_width() {
+        let mut app = App::for_test(Some(model_4i4()));
+        for tab in Tab::ALL {
+            app.tab = tab;
+            for w in [60, 80, 95, 160] {
+                let buf = render_to_buffer(&app, w, 30);
+                let hints = row_text(&buf, 29);
+                assert!(
+                    hints.trim_end().ends_with("? help"),
+                    "{w} cols, {}: {hints:?}",
+                    tab.title()
+                );
+            }
+        }
+        // At 95 columns the matrix footer leads with its own keys.
+        app.tab = Tab::Matrix;
+        let hints = row_text(&render_to_buffer(&app, 95, 30), 29);
+        assert!(hints.starts_with(" h j k l move"), "{hints:?}");
+    }
+
+    #[test]
+    fn footer_row_one_shows_selection_context() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        let row = row_text(&render_to_buffer(&app, 95, 30), 28);
+        assert!(row.trim_end().ends_with("Mix A · In 01 [PCM 1]"), "{row:?}");
+    }
+
+    #[test]
+    fn help_overlay_lists_tab_keys_from_the_keymap() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        press(&mut app, KeyCode::Char('?'));
+        assert!(app.show_help);
+        let buf = render_to_buffer(&app, 95, 30);
+        let screen: String = (0..30)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for b in keys::bindings(Scope::Matrix).chain(keys::bindings(Scope::Global)) {
+            assert!(screen.contains(b.help), "overlay is missing {:?}", b.help);
+        }
+        assert!(screen.contains("1235:8212"), "About block shows the USB id");
+        // Keys other than ?/Esc/q do nothing while help is open.
+        press(&mut app, KeyCode::Char('2'));
+        assert_eq!(app.tab, Tab::Matrix);
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn block_titles_hold_names_only() {
+        let mut app = App::for_test(Some(model_4i4()));
+        for tab in Tab::ALL {
+            app.tab = tab;
+            let buf = render_to_buffer(&app, 95, 30);
+            let body = row_text(&buf, 5);
+            assert!(
+                !body.contains("·  ") && !body.contains("toggle"),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn io_shift_l_steps_six_db_through_the_keymap() {
+        assert_eq!(
+            keys::lookup(Scope::Io, KeyCode::Char('L')),
+            Some(Action::IncBig)
+        );
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::IoDevice;
+        // Without ALSA the write fails, but the key must reach the I/O handler
+        // and not be swallowed as a global key.
+        press(&mut app, KeyCode::Char('L'));
+        assert_eq!(app.tab, Tab::IoDevice);
     }
 
     #[test]
