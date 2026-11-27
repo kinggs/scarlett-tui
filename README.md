@@ -13,13 +13,13 @@ panel. No background daemon when unused, no Electron or GTK toolkit, no `sudo`,
 and no hardcoded ALSA `numid`s.
 
 <p align="center">
-  <img src="design/tui-overview.png" alt="Overview tab at 95×30: header with Locked, 48.0 kHz, a red 48V badge and the model; live meters on a dB scale; the input, 48V and routing summary below" width="49%">
+  <img src="design/tui-overview.png" alt="Overview tab at 95×30: a one-line header with Locked, 48.0 kHz and the model; every meter on a dB scale, grouped, each row naming the source that feeds it" width="49%">
   &nbsp;
-  <img src="design/tui-matrix.png" alt="Mix matrix tab: mixes A to F across, each naming the output it feeds; quiet dots for −∞; the cursor cell reversed; a legend line" width="49%">
+  <img src="design/tui-matrix.png" alt="Mix matrix tab: mixes A to F across, each naming the output it feeds; quiet dots for −∞; the cursor cell reversed" width="49%">
 </p>
 
 <p align="center">
-  <img src="design/tui-io.png" alt="I/O tab: input gains, Line/Inst, Air and Pad, 48V as a badge, output volumes and mutes, device switches" width="49%">
+  <img src="design/tui-io.png" alt="I/O tab as a board: one row per channel with Line/Inst, Air and Pad across; 48V in its own section; each output's volume and mute on one row; device switches" width="49%">
   &nbsp;
   <img src="design/tui-help.png" alt="The ? overlay: this tab's keys, safety keys, global keys and an About block with model, USB id, firmware and card" width="49%">
 </p>
