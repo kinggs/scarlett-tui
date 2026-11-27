@@ -1,7 +1,7 @@
 use crate::alsa_ctl::{
     AlsaCard, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
 };
-use crate::model::{RouteGroup, ScarlettModel, meter_to_dbfs_with_max};
+use crate::model::{ClipLatch, RouteGroup, ScarlettModel, meter_to_dbfs_with_max};
 use crate::pipewire;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -115,6 +115,9 @@ struct MeterPayload {
     msg_type: &'static str,
     raw: Vec<i64>,
     dbfs: Vec<f64>,
+    /// Per-channel clip latch (≥ −1 dBFS), held until `clip clear`.
+    clip: Vec<bool>,
+    clip_any: bool,
 }
 
 /// Incremental, bounded byte accumulator for non-blocking line-oriented stdin.
@@ -566,6 +569,7 @@ enum DaemonCmd {
     MetersOn,
     MetersOff,
     Refresh,
+    ClipClear,
     Set {
         numid: u32,
         val: i64,
@@ -584,6 +588,9 @@ fn parse_command(line: &str) -> DaemonCmd {
     }
     if trimmed == "refresh" {
         return DaemonCmd::Refresh;
+    }
+    if trimmed == "clip clear" {
+        return DaemonCmd::ClipClear;
     }
     if let Some(rest) = trimmed.strip_prefix("set ") {
         let mut parts = rest.split_whitespace();
@@ -637,6 +644,7 @@ struct DaemonState {
     model: Option<ScarlettModel>,
     generation: u64,
     meters_on: bool,
+    clips: ClipLatch,
     pw: PwMonitor,
 }
 
@@ -644,6 +652,7 @@ impl DaemonState {
     fn disconnect(&mut self) -> io::Result<()> {
         self.alsa = None;
         self.model = None;
+        self.clips = ClipLatch::default();
         self.generation = self.generation.wrapping_add(1);
         self.pw.set_card(None);
         emit_disconnected(self.generation)
@@ -722,6 +731,9 @@ impl DaemonState {
             DaemonCmd::MetersOff => {
                 self.meters_on = false;
             }
+            DaemonCmd::ClipClear => {
+                self.clips.clear();
+            }
             DaemonCmd::Refresh => {
                 self.pw.request_refresh();
                 if let (Some(alsa), Some(model)) = (&self.alsa, &mut self.model)
@@ -798,6 +810,7 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
         model: None,
         generation: 0,
         meters_on: false,
+        clips: ClipLatch::default(),
         pw: PwMonitor::spawn(),
     };
     let mut last_meter = Instant::now();
@@ -926,14 +939,17 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
             && let Ok(raw) = alsa.read_values(mid, mc.kind, mc.count)
         {
             last_meter = Instant::now();
-            let dbfs = raw
+            let dbfs: Vec<f64> = raw
                 .iter()
                 .map(|&v| meter_to_dbfs_with_max(v, model.meter_max))
                 .collect();
+            state.clips.update(&dbfs);
             if emit_json(&MeterPayload {
                 msg_type: "meters",
                 raw,
                 dbfs,
+                clip: state.clips.as_slice().to_vec(),
+                clip_any: state.clips.any(),
             })
             .is_err()
             {
@@ -991,5 +1007,7 @@ mod tests {
             }
         );
         assert_eq!(parse_command("set 22 11 bogus"), DaemonCmd::Unknown);
+        assert_eq!(parse_command(" clip clear "), DaemonCmd::ClipClear);
+        assert_eq!(parse_command("clip"), DaemonCmd::Unknown);
     }
 }

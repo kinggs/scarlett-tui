@@ -49,6 +49,7 @@ pub enum Action {
     Last,
     ShowAll,
     Disconnect,
+    ClearClips,
 }
 
 /// One line of the help overlay, and optionally one footer hint.
@@ -91,6 +92,14 @@ const MOVE_ROWS: &[(K, Action)] = &[
 /// Footer hints are taken in table order within a scope, so put the most
 /// useful binding first.
 pub const KEYMAP: &[Binding] = &[
+    // Overview tab
+    b(
+        Scope::Overview,
+        "C",
+        "clear clip latches",
+        Some("clear clips"),
+        &[(K::Char('C'), A::ClearClips)],
+    ),
     // I/O tab
     b(Scope::Io, "j/k", "move", Some("move"), MOVE_ROWS),
     b(
@@ -288,6 +297,13 @@ pub const KEYMAP: &[Binding] = &[
         &[],
     ),
     b(Scope::Safety, "Esc", "cancel an armed action", None, &[]),
+    b(
+        Scope::Safety,
+        "C",
+        "clear clip latches (any tab)",
+        None,
+        &[(K::Char('C'), A::ClearClips)],
+    ),
     // Everywhere
     b(
         Scope::Global,
@@ -355,7 +371,7 @@ fn find(scope: Scope, code: K) -> Option<Action> {
 pub fn lookup(scope: Scope, code: K) -> Option<Action> {
     find(scope, code).or_else(|| match scope {
         Scope::Picker | Scope::Help => None,
-        _ => find(Scope::Global, code),
+        _ => find(Scope::Global, code).or_else(|| find(Scope::Safety, code)),
     })
 }
 
@@ -411,6 +427,14 @@ mod tests {
                 assert!(!b.keys.is_empty(), "{:?} {} has no keys", b.scope, b.label);
             }
         }
+        // A Safety key must not shadow, or be shadowed by, a global key.
+        for s in bindings(Scope::Safety).flat_map(|b| b.keys) {
+            assert!(
+                find(Scope::Global, s.0).is_none(),
+                "{:?} clashes with a global key",
+                s.0
+            );
+        }
     }
 
     #[test]
@@ -419,6 +443,11 @@ mod tests {
         assert_eq!(lookup(Scope::Io, K::Char('L')), Some(Action::IncBig));
         assert_eq!(lookup(Scope::Matrix, K::Char('3')), Some(Action::GoTab(2)));
         assert_eq!(lookup(Scope::Overview, K::Char('?')), Some(Action::Help));
+        assert_eq!(
+            lookup(Scope::Matrix, K::Char('C')),
+            Some(Action::ClearClips)
+        );
+        assert_eq!(lookup(Scope::Help, K::Char('C')), None);
         // Modal scopes: q cancels, digits do nothing.
         assert_eq!(lookup(Scope::Picker, K::Char('q')), Some(Action::Cancel));
         assert_eq!(lookup(Scope::Picker, K::Char('1')), None);

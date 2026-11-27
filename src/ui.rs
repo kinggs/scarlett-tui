@@ -2,7 +2,10 @@ use crate::alsa_ctl::{
     AlsaCard, AlsaControl, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
 };
 use crate::keys::{self, Action, Scope};
-use crate::model::{RouteGroup, ScarlettModel, UnityJump, meter_to_dbfs_with_max, unity_jump};
+use crate::model::{
+    CLIP_DBFS, ClipLatch, HOT_DBFS, RouteGroup, ScarlettModel, UnityJump, meter_to_dbfs_with_max,
+    unity_jump,
+};
 use crate::pipewire::{self, PwLink};
 use crossterm::{
     cursor::Show,
@@ -161,6 +164,7 @@ pub struct App {
     meter_raw: Vec<i64>,
     meter_peak: Vec<f64>,
     meter_peak_time: Vec<Instant>,
+    clips: ClipLatch,
 
     // Per-tab cursors & remembered matrix levels for safe unmute
     io_cursor: usize,
@@ -200,6 +204,7 @@ impl App {
             meter_raw: Vec::new(),
             meter_peak: Vec::new(),
             meter_peak_time: Vec::new(),
+            clips: ClipLatch::default(),
             io_cursor: 0,
             route_cursor: 0,
             route_picker: None,
@@ -237,6 +242,7 @@ impl App {
             meter_raw: vec![0; n],
             meter_peak: vec![-96.0; n],
             meter_peak_time: vec![Instant::now(); n],
+            clips: ClipLatch::default(),
             io_cursor: 0,
             route_cursor: 0,
             route_picker: None,
@@ -309,6 +315,7 @@ impl App {
         self.meter_raw.clear();
         self.meter_peak.clear();
         self.meter_peak_time.clear();
+        self.clips = ClipLatch::default();
         self.generation = self.generation.wrapping_add(1);
 
         let entry = self
@@ -511,6 +518,27 @@ impl App {
         items
     }
 
+    /// Take one frame of raw meter values: update peak hold and clip latches.
+    fn ingest_meters(&mut self, raw: Vec<i64>, now: Instant) {
+        let max = self.model.as_ref().map_or(4095, |m| m.meter_max);
+        if self.meter_peak.len() != raw.len() {
+            self.meter_peak = vec![-96.0; raw.len()];
+            self.meter_peak_time = vec![now; raw.len()];
+        }
+        let dbfs: Vec<f64> = raw
+            .iter()
+            .map(|&v| meter_to_dbfs_with_max(v, max))
+            .collect();
+        for (i, &db) in dbfs.iter().enumerate() {
+            if db >= self.meter_peak[i] || now.duration_since(self.meter_peak_time[i]) > PEAK_HOLD {
+                self.meter_peak[i] = db;
+                self.meter_peak_time[i] = now;
+            }
+        }
+        self.clips.update(&dbfs);
+        self.meter_raw = raw;
+    }
+
     fn arm(&mut self, action: ArmedAction) {
         self.armed = Some(Armed {
             action,
@@ -694,21 +722,7 @@ impl App {
             && let Some(mc) = model.controls.get(&mid)
             && let Ok(raw) = alsa.read_values(mid, mc.kind, mc.count)
         {
-            let now = Instant::now();
-            if self.meter_peak.len() != raw.len() {
-                self.meter_peak = vec![-96.0; raw.len()];
-                self.meter_peak_time = vec![now; raw.len()];
-            }
-            for (i, &v) in raw.iter().enumerate() {
-                let db = meter_to_dbfs_with_max(v, model.meter_max);
-                if db >= self.meter_peak[i]
-                    || now.duration_since(self.meter_peak_time[i]) > Duration::from_millis(1200)
-                {
-                    self.meter_peak[i] = db;
-                    self.meter_peak_time[i] = now;
-                }
-            }
-            self.meter_raw = raw;
+            self.ingest_meters(raw, Instant::now());
         }
 
         // Periodically refresh active stream sample rate
@@ -818,6 +832,11 @@ impl App {
             }
             Action::Help => {
                 self.show_help = true;
+                return;
+            }
+            Action::ClearClips => {
+                self.clips.clear();
+                self.set_status("Clip latches cleared");
                 return;
             }
             Action::SwitchCard if self.cards.len() > 1 && self.card_override.is_none() => {
@@ -1321,6 +1340,12 @@ impl App {
                     Span::styled(" 48V ", badge(Color::Red)),
                 ]);
             }
+            if self.clips.any() {
+                segs.push(vec![
+                    Span::raw("  "),
+                    Span::styled(" CLIP ", badge(Color::Red)),
+                ]);
+            }
             segs.push(vec![
                 Span::raw("  "),
                 Span::styled(
@@ -1420,17 +1445,24 @@ impl App {
         };
 
         // Left: Live Hardware Level Meters
-        let bar_width = cols[0].width.saturating_sub(36).max(8) as usize;
-        let mut meter_lines = Vec::new();
+        // Label (24) + bar + value (9) + CLIP badge (7) + borders (2).
+        let bar_width = cols[0].width.saturating_sub(44).max(8) as usize;
+        let mut meter_lines = vec![scale_row(bar_width)];
+        let mut is_channel = vec![false];
         let mut last_group: Option<RouteGroup> = None;
 
         for mc in &m.meter_channels {
-            if mc.source == "Off" && self.meter_raw.get(mc.meter_index).copied().unwrap_or(0) == 0 {
+            // Hide unrouted, silent channels, but never one holding a clip latch.
+            if mc.source == "Off"
+                && self.meter_raw.get(mc.meter_index).copied().unwrap_or(0) == 0
+                && !self.clips.get(mc.meter_index)
+            {
                 continue;
             }
             if last_group != Some(mc.group) {
                 if last_group.is_some() {
                     meter_lines.push(Line::from(""));
+                    is_channel.push(false);
                 }
                 meter_lines.push(Line::from(Span::styled(
                     format!(" {}", mc.group.title()),
@@ -1438,6 +1470,7 @@ impl App {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )));
+                is_channel.push(false);
                 last_group = Some(mc.group);
             }
 
@@ -1448,27 +1481,10 @@ impl App {
                 .get(mc.meter_index)
                 .copied()
                 .unwrap_or(-96.0);
-            let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
-            let filled = (frac * bar_width as f64).round() as usize;
-            let empty = bar_width.saturating_sub(filled);
-
-            let bar_color = if db >= -1.0 {
-                Color::Red
-            } else if db >= -9.0 {
-                Color::Yellow
-            } else {
-                Color::Green
-            };
-
             let db_text = if db <= -60.0 {
                 "  -∞ dB".to_string()
             } else {
                 format!("{db:+5.1} dB")
-            };
-            let peak_tag = if peak > -60.0 {
-                format!(" (pk {peak:+.0})")
-            } else {
-                String::new()
             };
             let raw_label = if mc.source.is_empty() {
                 mc.label.clone()
@@ -1477,18 +1493,32 @@ impl App {
             };
             let label = truncate(&raw_label, 22);
 
-            meter_lines.push(Line::from(vec![
-                Span::raw(format!(" {label:<22} ")),
-                Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-                Span::styled("░".repeat(empty), decoration()),
-                Span::raw(format!(" {db_text}")),
-                Span::styled(peak_tag, secondary()),
-            ]));
+            let mut spans = vec![Span::raw(format!(" {label:<22} "))];
+            spans.extend(meter_bar(db, peak, bar_width));
+            spans.push(Span::raw(format!(" {db_text}")));
+            if self.clips.get(mc.meter_index) {
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("CLIP", badge(Color::Red)));
+            }
+            meter_lines.push(Line::from(spans));
+            is_channel.push(true);
         }
 
-        if meter_lines.is_empty() {
-            meter_lines.push(Line::from(Span::styled(
+        if meter_lines.len() == 1 {
+            meter_lines = vec![Line::from(Span::styled(
                 " No hardware level meter exposed by this model.",
+                secondary(),
+            ))];
+            is_channel = vec![false];
+        }
+
+        // Never cut rows silently: show what fits, then "↓ N more".
+        let inner_h = cols[0].height.saturating_sub(2) as usize;
+        if meter_lines.len() > inner_h && inner_h > 1 {
+            let hidden = is_channel[inner_h - 1..].iter().filter(|&&c| c).count();
+            meter_lines.truncate(inner_h - 1);
+            meter_lines.push(Line::from(Span::styled(
+                format!(" ↓ {hidden} more (widen or heighten the window)"),
                 secondary(),
             )));
         }
@@ -2333,6 +2363,79 @@ fn hint_line(hints: &[(&str, &str)], with_help: bool, width: usize) -> Line<'sta
     Line::from(spans)
 }
 
+/// How long the peak-hold tick holds before it falls (docs/DESIGN.md).
+const PEAK_HOLD: Duration = Duration::from_millis(1500);
+
+/// Meter range drawn by the bars, in dBFS.
+const METER_FLOOR_DB: f64 = -60.0;
+
+fn zone_color(db: f64) -> Color {
+    if db >= CLIP_DBFS {
+        Color::Red
+    } else if db >= HOT_DBFS {
+        Color::Yellow
+    } else {
+        Color::Green
+    }
+}
+
+/// Column (0-based) of `db` in a bar `width` cells wide.
+fn meter_col(db: f64, width: usize) -> usize {
+    let frac = ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0);
+    ((frac * width as f64).round() as usize).min(width)
+}
+
+/// A meter bar: filled cells coloured by zone, empty track in DarkGray, and a
+/// peak-hold tick `│` inside the bar.
+fn meter_bar(db: f64, peak: f64, width: usize) -> Vec<Span<'static>> {
+    let filled = meter_col(db, width);
+    let tick = (peak > METER_FLOOR_DB).then(|| meter_col(peak, width).saturating_sub(1));
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut push = |text: char, style: Style| match spans.last_mut() {
+        Some(last) if last.style == style => last.content.to_mut().push(text),
+        _ => spans.push(Span::styled(text.to_string(), style)),
+    };
+    for i in 0..width {
+        let cell_db = METER_FLOOR_DB + (i as f64 + 0.5) / width as f64 * -METER_FLOOR_DB;
+        if i < filled {
+            push('█', Style::default().fg(zone_color(cell_db)));
+        } else if tick == Some(i) {
+            push('│', Style::default().fg(zone_color(cell_db)));
+        } else {
+            push('░', decoration());
+        }
+    }
+    spans
+}
+
+/// The dB scale above the meters, aligned to `meter_bar` columns.
+fn scale_row(width: usize) -> Line<'static> {
+    let mut row = vec![' '; width];
+    for mark in [-48.0, -24.0, -12.0, -6.0, -3.0, 0.0] {
+        let text = if mark == 0.0 {
+            "0".to_string()
+        } else {
+            format!("{mark:.0}")
+        };
+        let end = meter_col(mark, width);
+        let start = end.saturating_sub(text.chars().count());
+        if start == 0 && mark != 0.0 && end < text.len() {
+            continue;
+        }
+        // Skip a label that would overwrite its right-hand neighbour.
+        if row[start..end].iter().any(|&c| c != ' ') {
+            continue;
+        }
+        for (slot, ch) in row[start..end].iter_mut().zip(text.chars()) {
+            *slot = ch;
+        }
+    }
+    Line::from(vec![
+        Span::raw(" ".repeat(24)),
+        Span::styled(row.into_iter().collect::<String>(), secondary()),
+    ])
+}
+
 /// Smallest terminal the layout supports (Kenny's ruling: design for 95×30,
 /// show a message under 80×24).
 const MIN_WIDTH: u16 = 80;
@@ -2787,6 +2890,77 @@ mod tests {
         let meters = find_row(&buf, 36, "Live Hardware Meters").unwrap();
         let summary = find_row(&buf, 36, "Status & Signal Path").unwrap();
         assert_eq!(meters, summary, "side by side at 160 columns");
+    }
+
+    #[test]
+    fn clip_latches_shows_badges_and_clears_with_shift_c() {
+        let mut app = App::for_test(Some(model_4i4()));
+        let now = Instant::now();
+        app.ingest_meters(vec![4095, 0], now);
+        app.ingest_meters(vec![0, 0], now);
+        assert!(app.clips.get(0), "latch holds after the level drops");
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(row_text(&buf, 1).contains("CLIP"), "header badge");
+        let screen: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert_eq!(screen.matches("CLIP").count(), 2, "header + one meter row");
+
+        app.tab = Tab::Matrix; // C works from any tab
+        press(&mut app, KeyCode::Char('C'));
+        assert!(!app.clips.any());
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(!row_text(&buf, 1).contains("CLIP"));
+    }
+
+    #[test]
+    fn peak_tick_holds_inside_the_bar() {
+        let spans = meter_bar(-96.0, -6.0, 40);
+        let bar: String = spans.iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(bar.chars().count(), 40);
+        let tick = bar.chars().position(|c| c == '│').expect("tick drawn");
+        assert_eq!(tick, meter_col(-6.0, 40) - 1);
+        assert!(!bar.contains('█'));
+
+        // Peak hold: falls after 1.5 s, not before.
+        let mut app = App::for_test(Some(model_4i4()));
+        let t0 = Instant::now();
+        app.ingest_meters(vec![2048, 0], t0); // about −6 dBFS
+        app.ingest_meters(vec![0, 0], t0 + Duration::from_millis(1400));
+        assert!(app.meter_peak[0] > -7.0);
+        app.ingest_meters(vec![0, 0], t0 + Duration::from_millis(1600));
+        assert!(app.meter_peak[0] < -60.0);
+    }
+
+    #[test]
+    fn meter_bar_colours_by_zone_and_scale_lines_up() {
+        let spans = meter_bar(0.0, -96.0, 60);
+        let colours: Vec<Color> = spans.iter().filter_map(|s| s.style.fg).collect();
+        assert_eq!(colours, vec![Color::Green, Color::Yellow, Color::Red]);
+        let scale: String = scale_row(60).spans[1].content.to_string();
+        for mark in ["-48", "-24", "-12", "-6", "-3", "0"] {
+            assert!(scale.contains(mark), "{scale:?}");
+        }
+        assert!(scale.trim_end().ends_with('0'));
+    }
+
+    #[test]
+    fn overflowing_meters_say_how_many_are_hidden() {
+        let mut model = model_4i4();
+        for i in 2..40 {
+            model.meter_channels.push(crate::model::MeterChannel {
+                meter_index: i,
+                label: format!("Meter {:02}", i + 1),
+                source: String::new(),
+                group: RouteGroup::Unknown,
+            });
+        }
+        let mut app = App::for_test(Some(model));
+        app.meter_raw = vec![100; 40];
+        let buf = render_to_buffer(&app, 95, 30);
+        let screen: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(
+            screen.contains("↓ ") && screen.contains(" more"),
+            "{screen}"
+        );
     }
 
     #[test]
