@@ -217,6 +217,81 @@ struct Armed {
     generation: u64,
 }
 
+/// How the TUI draws (docs/DESIGN.md "Colour-free modes").
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderOpts {
+    /// Drop every colour; keep bold, dim, reversed, glyphs and words.
+    pub no_color: bool,
+    /// Replace Unicode glyphs and box drawing with ASCII.
+    pub ascii: bool,
+}
+
+impl RenderOpts {
+    /// Colour is off for `--no-color`, a non-empty `NO_COLOR` (no-color.org) or `TERM=dumb`.
+    pub fn from_env(
+        no_color_flag: bool,
+        ascii: bool,
+        no_color_env: Option<&str>,
+        term: Option<&str>,
+    ) -> Self {
+        let no_color =
+            no_color_flag || no_color_env.is_some_and(|v| !v.is_empty()) || term == Some("dumb");
+        Self { no_color, ascii }
+    }
+}
+
+/// ASCII stand-in for one drawn glyph; `None` keeps the symbol.
+fn ascii_for(sym: &str) -> Option<char> {
+    let mut chars = sym.chars();
+    let c = chars.next()?;
+    if chars.next().is_none() && c.is_ascii() {
+        return None;
+    }
+    Some(match c {
+        '█' => '#',
+        '░' => '-',
+        '│' | '┃' | '║' | '▏' => '|',
+        '─' | '━' | '═' => '-',
+        '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '╭' | '╮' | '╯' | '╰' => {
+            '+'
+        }
+        '●' => '*',
+        '○' => 'o',
+        '■' => 'x',
+        '□' => '.',
+        '▲' => '!',
+        '✕' | '×' => 'x',
+        '⊘' => '/',
+        '·' | '…' => '.',
+        '⟲' | '∞' => '~',
+        '◂' | '←' => '<',
+        '▸' | '→' => '>',
+        '↓' => 'v',
+        '↑' => '^',
+        '−' | '–' | '—' => '-',
+        '±' => '+',
+        _ => '?',
+    })
+}
+
+/// Apply colour-free and ASCII modes to a finished frame.
+fn apply_render_opts(buf: &mut ratatui::buffer::Buffer, opts: RenderOpts) {
+    if !opts.no_color && !opts.ascii {
+        return;
+    }
+    for cell in buf.content.iter_mut() {
+        if opts.no_color {
+            cell.fg = Color::Reset;
+            cell.bg = Color::Reset;
+        }
+        if opts.ascii
+            && let Some(c) = ascii_for(cell.symbol())
+        {
+            cell.set_char(c);
+        }
+    }
+}
+
 /// RAII guard that restores raw mode, alternate screen, and cursor even on panic.
 struct TerminalGuard;
 
@@ -261,10 +336,11 @@ pub struct App {
     last_rate_check: Instant,
     last_poll_fallback: Instant,
     should_quit: bool,
+    opts: RenderOpts,
 }
 
 impl App {
-    fn new(card_override: Option<u32>) -> Self {
+    fn new(card_override: Option<u32>, opts: RenderOpts) -> Self {
         let cards = discover_focusrite_cards();
         let current_card_index = match card_override {
             Some(idx) => cards.iter().find(|c| c.index == idx).map(|c| c.index),
@@ -298,6 +374,7 @@ impl App {
             last_rate_check: Instant::now(),
             last_poll_fallback: Instant::now(),
             should_quit: false,
+            opts,
         };
         app.connect_current();
         app.refresh_pipewire();
@@ -336,6 +413,7 @@ impl App {
             last_rate_check: Instant::now(),
             last_poll_fallback: Instant::now(),
             should_quit: false,
+            opts: RenderOpts::default(),
         }
     }
 
@@ -1372,6 +1450,11 @@ impl App {
     }
 
     fn render(&self, f: &mut Frame) {
+        self.render_frame(f);
+        apply_render_opts(f.buffer_mut(), self.opts);
+    }
+
+    fn render_frame(&self, f: &mut Frame) {
         let area = f.area();
         if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
             render_too_small(f, area);
@@ -2828,7 +2911,7 @@ fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub fn run_tui(card_override: Option<u32>) -> io::Result<()> {
+pub fn run_tui(card_override: Option<u32>, opts: RenderOpts) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     if let Err(e) = execute!(stdout, EnterAlternateScreen) {
@@ -2840,7 +2923,7 @@ pub fn run_tui(card_override: Option<u32>) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(card_override);
+    let mut app = App::new(card_override, opts);
 
     while !app.should_quit {
         app.tick();
@@ -3430,6 +3513,80 @@ mod tests {
         let x = row[..row.find('⟲').unwrap()].chars().count() as u16;
         assert_eq!(buf[(x, y)].fg, Color::Magenta);
         assert!(screen_text(&buf).contains("not stored on the interface"));
+    }
+
+    #[test]
+    fn no_color_comes_from_flag_env_or_dumb_terminal() {
+        assert!(!RenderOpts::from_env(false, false, None, Some("xterm-256color")).no_color);
+        assert!(RenderOpts::from_env(true, false, None, None).no_color);
+        assert!(RenderOpts::from_env(false, false, Some("1"), None).no_color);
+        assert!(
+            !RenderOpts::from_env(false, false, Some(""), None).no_color,
+            "empty NO_COLOR is unset"
+        );
+        assert!(RenderOpts::from_env(false, false, None, Some("dumb")).no_color);
+        assert!(RenderOpts::from_env(false, true, None, None).ascii);
+    }
+
+    #[test]
+    fn no_color_mode_keeps_badges_by_modifier() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.opts.no_color = true;
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&20)
+            .unwrap()
+            .values = vec![1];
+        for tab in Tab::ALL {
+            app.tab = tab;
+            let buf = render_to_buffer(&app, 95, 30);
+            assert!(
+                buf.content()
+                    .iter()
+                    .all(|c| c.fg == Color::Reset && c.bg == Color::Reset),
+                "colour left on {}",
+                tab.title()
+            );
+        }
+        app.tab = Tab::Overview;
+        let buf = render_to_buffer(&app, 95, 30);
+        let row = row_text(&buf, 1);
+        let x = row[..row.find("48V").unwrap()].chars().count() as u16;
+        assert!(
+            buf[(x, 1)].modifier.contains(Modifier::REVERSED),
+            "48V badge still reversed"
+        );
+    }
+
+    #[test]
+    fn ascii_mode_draws_only_ascii() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.opts.ascii = true;
+        app.ingest_meters(vec![2048, 4095], Instant::now());
+        for tab in Tab::ALL {
+            app.tab = tab;
+            for (w, h) in [(95, 30), (160, 36), (60, 20)] {
+                let buf = render_to_buffer(&app, w, h);
+                for cell in buf.content() {
+                    assert!(
+                        cell.symbol().is_ascii(),
+                        "{:?} on {} at {w}x{h}",
+                        cell.symbol(),
+                        tab.title()
+                    );
+                }
+            }
+        }
+        app.tab = Tab::Overview;
+        let screen: String = (0..30)
+            .map(|y| row_text(&render_to_buffer(&app, 95, 30), y))
+            .collect();
+        assert!(
+            screen.contains('#') && screen.contains("CLIP"),
+            "meter fill and clip word survive"
+        );
     }
 
     #[test]
