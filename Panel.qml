@@ -636,7 +636,8 @@ Panel {
 
     content: PanelKeyCatcher {
       id: keyCatcher
-      implicitHeight: panelColumn.implicitHeight
+      readonly property real footerHeight: panelFooter.visible ? panelFooter.implicitHeight : 0
+      implicitHeight: panelColumn.implicitHeight + footerHeight
       anchors.fill: parent
       onCloseRequested: {
         if (root.expandedOutput >= 0) root.expandedOutput = -1
@@ -656,6 +657,7 @@ Panel {
       ScrollView {
         id: scrollArea
         anchors.fill: parent
+        anchors.bottomMargin: keyCatcher.footerHeight
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         ScrollBar.vertical.policy: panelColumn.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
@@ -986,10 +988,10 @@ Panel {
                 width: panelColumn.width
                 spacing: Style.space(8)
 
-                Item { width: Style.space(92) - Style.space(8); height: 1 }
+                Item { width: Style.space(92) - Style.space(2); height: 1 }
 
                 MeterTrack {
-                  width: panelColumn.width - Style.space(92) - Style.space(66)
+                  width: panelColumn.width - Style.space(92) - Style.space(72)
                   idx: inBlock.meterIdx
                   anchors.verticalCenter: parent.verticalCenter
                 }
@@ -1002,6 +1004,7 @@ Panel {
                   color: Util.alpha(root.fg, 0.66)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
                 }
 
                 Rectangle {
@@ -1189,6 +1192,7 @@ Panel {
                           color: Util.alpha(root.fg, 0.66)
                           font.family: root.fontFamily
                           font.pixelSize: Style.font.caption
+                          anchors.verticalCenter: parent.verticalCenter
                         }
 
                         Rectangle {
@@ -1311,68 +1315,76 @@ Panel {
             }
           }
 
-          // ---------- Footer: the key line; ? opens the key list ----------
-          PanelSeparator {
-            visible: root.connected && root.mixerAvailable
-            foreground: root.fg
-          }
+        }
+      }
 
-          Column {
-            visible: root.connected && root.mixerAvailable
-            width: parent.width
-            spacing: Style.space(2)
+      // ---------- Footer: the key line; ? opens the key list ----------
+      // Pinned under the scroll area, so the key line (and ?) is always in
+      // view however tall the device's channel list is.
+      Column {
+        id: panelFooter
+        visible: root.connected && root.mixerAvailable
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        spacing: Style.space(2)
+        topPadding: Style.space(8)
+
+        PanelSeparator {
+          foreground: root.fg
+        }
+
+        Item { width: 1; height: Style.space(6) }
+
+        Text {
+          visible: !root.showKeys
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "↑↓ move · Space toggle · m mute · ? keys"
+          color: Util.alpha(root.fg, 0.66)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
+        }
+
+        Repeater {
+          model: root.showKeys ? root.keyHelp : []
+
+          Row {
+            required property var modelData
+            width: panelFooter.width
+            spacing: Style.space(8)
 
             Text {
-              visible: !root.showKeys
-              width: parent.width
+              width: Style.space(92) - Style.space(8)
               textFormat: Text.PlainText
-              text: "↑↓ move · Space toggle · m mute · ? keys"
+              text: String(modelData[0])
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+
+            Text {
+              width: parent.width - Style.space(92)
+              textFormat: Text.PlainText
+              text: String(modelData[1])
               color: Util.alpha(root.fg, 0.66)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
-
-            Repeater {
-              model: root.showKeys ? root.keyHelp : []
-
-              Row {
-                required property var modelData
-                width: panelColumn.width
-                spacing: Style.space(8)
-
-                Text {
-                  width: Style.space(92) - Style.space(8)
-                  textFormat: Text.PlainText
-                  text: String(modelData[0])
-                  color: root.fg
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  font.bold: true
-                }
-
-                Text {
-                  width: parent.width - Style.space(92)
-                  textFormat: Text.PlainText
-                  text: String(modelData[1])
-                  color: Util.alpha(root.fg, 0.66)
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
-                }
-              }
-            }
-
-            Text {
-              visible: root.showKeys
-              width: parent.width
-              textFormat: Text.PlainText
-              text: "? closes this list"
-              color: Util.alpha(root.fg, 0.66)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-            }
           }
+        }
+
+        Text {
+          visible: root.showKeys
+          width: parent.width
+          textFormat: Text.PlainText
+          text: "? closes this list"
+          color: Util.alpha(root.fg, 0.66)
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
         }
       }
     }
