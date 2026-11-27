@@ -90,6 +90,19 @@ const MOVE_ROWS: &[(K, Action)] = &[
     (K::Up, A::Up),
 ];
 
+/// −/+ 1 dB, or previous / next choice. The same keys on every tab; `=` and
+/// `[` `]` are silent aliases, so Shift makes the same key bigger.
+const STEP_ONE: &[(K, Action)] = &[
+    (K::Char('-'), A::Dec),
+    (K::Char('['), A::Dec),
+    (K::Char('+'), A::Inc),
+    (K::Char('='), A::Inc),
+    (K::Char(']'), A::Inc),
+];
+
+/// −/+ 6 dB. One press never rises more than 6 dB, so it needs no confirm.
+const STEP_SIX: &[(K, Action)] = &[(K::Char('{'), A::DecBig), (K::Char('}'), A::IncBig)];
+
 /// Footer hints are taken in table order within a scope, so put the most
 /// useful binding first.
 pub const KEYMAP: &[Binding] = &[
@@ -153,26 +166,21 @@ pub const KEYMAP: &[Binding] = &[
         "Enter",
         "pick source",
         Some("pick"),
-        &[(K::Enter, A::Toggle), (K::Char(' '), A::Toggle)],
+        &[(K::Enter, A::Toggle)],
     ),
     b(
         Scope::Routing,
-        "h/l",
+        "- +",
         "previous / next source",
-        Some("cycle"),
-        &[
-            (K::Char('h'), A::Left),
-            (K::Left, A::Left),
-            (K::Char('l'), A::Right),
-            (K::Right, A::Right),
-        ],
+        Some("source"),
+        STEP_ONE,
     ),
     b(
         Scope::Routing,
         "x",
         "route off",
         Some("off"),
-        &[(K::Char('x'), A::Off), (K::Char('0'), A::Off)],
+        &[(K::Char('x'), A::Off)],
     ),
     // Matrix tab
     b(
@@ -191,26 +199,8 @@ pub const KEYMAP: &[Binding] = &[
             (K::Right, A::Right),
         ],
     ),
-    b(
-        Scope::Matrix,
-        "+ / -",
-        "±1 dB",
-        Some("±1 dB"),
-        &[
-            (K::Char('+'), A::Inc),
-            (K::Char('='), A::Inc),
-            (K::Char(']'), A::Inc),
-            (K::Char('-'), A::Dec),
-            (K::Char('['), A::Dec),
-        ],
-    ),
-    b(
-        Scope::Matrix,
-        "{ / }",
-        "±6 dB",
-        Some("±6 dB"),
-        &[(K::Char('}'), A::IncBig), (K::Char('{'), A::DecBig)],
-    ),
+    b(Scope::Matrix, "- +", "−/+ 1 dB", Some("±1 dB"), STEP_ONE),
+    b(Scope::Matrix, "{ }", "−/+ 6 dB", Some("±6 dB"), STEP_SIX),
     b(
         Scope::Matrix,
         "0",
@@ -221,14 +211,9 @@ pub const KEYMAP: &[Binding] = &[
     b(
         Scope::Matrix,
         "m",
-        "cell off (−∞), or restore",
-        Some("off"),
-        &[
-            (K::Char('m'), A::Mute),
-            (K::Char('x'), A::Mute),
-            (K::Enter, A::Mute),
-            (K::Char(' '), A::Mute),
-        ],
+        "mute cell; again restores",
+        Some("mute"),
+        &[(K::Char('m'), A::Mute)],
     ),
     b(
         Scope::Matrix,
@@ -248,10 +233,10 @@ pub const KEYMAP: &[Binding] = &[
     b(Scope::PipeWire, "j/k", "move", Some("move"), MOVE_ROWS),
     b(
         Scope::PipeWire,
-        "d",
-        "disconnect link",
+        "x",
+        "disconnect link (also Del)",
         Some("disconnect"),
-        &[(K::Char('d'), A::Disconnect), (K::Delete, A::Disconnect)],
+        &[(K::Char('x'), A::Disconnect), (K::Delete, A::Disconnect)],
     ),
     b(
         Scope::PipeWire,
@@ -267,7 +252,7 @@ pub const KEYMAP: &[Binding] = &[
         "Enter",
         "set source",
         Some("set"),
-        &[(K::Enter, A::Confirm), (K::Char(' '), A::Confirm)],
+        &[(K::Enter, A::Confirm)],
     ),
     b(
         Scope::Picker,
@@ -296,7 +281,13 @@ pub const KEYMAP: &[Binding] = &[
         ],
     ),
     // Safety: documented here, handled by the armed-action logic.
-    b(Scope::Safety, "Space Space", "enable 48V (I/O)", None, &[]),
+    b(
+        Scope::Safety,
+        "Space Space",
+        "enable 48V (Space only)",
+        None,
+        &[],
+    ),
     b(Scope::Safety, "0 0", "unity, rise over +6 dB", None, &[]),
     b(Scope::Safety, "Esc", "cancel an armed action", None, &[]),
     b(
@@ -454,6 +445,54 @@ mod tests {
         assert_eq!(lookup(Scope::Picker, K::Char('q')), Some(Action::Cancel));
         assert_eq!(lookup(Scope::Picker, K::Char('1')), None);
         assert_eq!(lookup(Scope::Help, K::Char('r')), None);
+    }
+
+    /// docs/DESIGN.md "One vocabulary": a key means one thing on every tab.
+    #[test]
+    fn level_keys_are_the_same_on_routing_and_matrix() {
+        for scope in [Scope::Routing, Scope::Matrix] {
+            for (k, a) in [
+                ('-', Action::Dec),
+                ('[', Action::Dec),
+                ('+', Action::Inc),
+                ('=', Action::Inc),
+                (']', Action::Inc),
+            ] {
+                assert_eq!(lookup(scope, K::Char(k)), Some(a), "{scope:?} {k}");
+            }
+        }
+        assert_eq!(lookup(Scope::Matrix, K::Char('{')), Some(Action::DecBig));
+        assert_eq!(lookup(Scope::Matrix, K::Char('}')), Some(Action::IncBig));
+        // Move keys never change a value.
+        assert_eq!(lookup(Scope::Routing, K::Char('h')), None);
+        assert_eq!(lookup(Scope::Routing, K::Char('l')), None);
+        assert_eq!(lookup(Scope::Matrix, K::Char('l')), Some(Action::Right));
+    }
+
+    #[test]
+    fn m_is_the_only_mute_and_x_the_only_disconnect() {
+        assert_eq!(lookup(Scope::Matrix, K::Char('m')), Some(Action::Mute));
+        for k in [K::Char('x'), K::Char(' '), K::Enter] {
+            assert_eq!(lookup(Scope::Matrix, k), None, "{k:?} must not mute a cell");
+        }
+        assert_eq!(lookup(Scope::Routing, K::Char('x')), Some(Action::Off));
+        // 0 is unity only; it must never mean "route off".
+        assert_eq!(lookup(Scope::Routing, K::Char('0')), None);
+        assert_eq!(lookup(Scope::Matrix, K::Char('0')), Some(Action::Unity));
+        assert_eq!(
+            lookup(Scope::PipeWire, K::Char('x')),
+            Some(Action::Disconnect)
+        );
+        assert_eq!(lookup(Scope::PipeWire, K::Delete), Some(Action::Disconnect));
+        assert_eq!(lookup(Scope::PipeWire, K::Char('d')), None);
+    }
+
+    #[test]
+    fn space_never_opens_or_sets_a_route() {
+        assert_eq!(lookup(Scope::Routing, K::Char(' ')), None);
+        assert_eq!(lookup(Scope::Routing, K::Enter), Some(Action::Toggle));
+        assert_eq!(lookup(Scope::Picker, K::Char(' ')), None);
+        assert_eq!(lookup(Scope::Picker, K::Enter), Some(Action::Confirm));
     }
 
     #[test]

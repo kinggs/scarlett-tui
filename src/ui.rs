@@ -183,7 +183,8 @@ impl ArmedAction {
     fn confirmed_by(&self, code: KeyCode) -> bool {
         match self {
             ArmedAction::Unity { .. } => code == KeyCode::Char('0'),
-            ArmedAction::Phantom { .. } => matches!(code, KeyCode::Char(' ') | KeyCode::Enter),
+            // Only Space confirms 48V (docs/DESIGN.md "48V keys").
+            ArmedAction::Phantom { .. } => code == KeyCode::Char(' '),
         }
     }
 
@@ -1271,7 +1272,7 @@ impl App {
                     filtering: false,
                 });
             }
-            Action::Right => {
+            Action::Inc => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1283,7 +1284,7 @@ impl App {
                     self.write_control(numid, next);
                 }
             }
-            Action::Left => {
+            Action::Dec => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -3057,6 +3058,46 @@ mod tests {
         press(&mut app, KeyCode::Char(' '));
         press(&mut app, KeyCode::Char(' '));
         assert!(app.armed.is_none());
+    }
+
+    #[test]
+    fn only_space_confirms_an_armed_48v() {
+        let mut app = io_app_on_phantom();
+        press(&mut app, KeyCode::Char(' '));
+        let first = app.armed.as_ref().unwrap().at;
+        // Enter cancels the arm and is then handled as a new toggle: it never
+        // confirms, so 48V is still only armed.
+        press(&mut app, KeyCode::Enter);
+        let again = app.armed.as_ref().expect("Enter must not confirm 48V");
+        assert!(again.at >= first);
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_none(), "Space confirms");
+    }
+
+    #[test]
+    fn matrix_space_and_enter_do_not_touch_a_cell() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        for code in [KeyCode::Char(' '), KeyCode::Enter, KeyCode::Char('x')] {
+            press(&mut app, code);
+            assert!(app.matrix_prev_levels.is_empty(), "{code:?} muted a cell");
+            assert!(app.status_msg.is_empty(), "{code:?} did something");
+        }
+    }
+
+    #[test]
+    fn routing_picker_opens_on_enter_only() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Routing;
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.route_picker.is_none());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.route_picker.is_some());
+        // Space does not set the source; Esc cancels.
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.route_picker.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.route_picker.is_none());
     }
 
     #[test]
