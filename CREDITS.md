@@ -8,7 +8,10 @@ actually in this repository. Our own code is MIT ([LICENSE](LICENSE)).
 | Source | Author | Licence | What is in this repository |
 |---|---|---|---|
 | Linux kernel `sound/usb/mixer_scarlett2.c` & `mixer_quirks.c` | Geoffrey D. Bennett & ALSA contributors | GPL-2.0 | **No source code.** Read for USB PID tables, control naming conventions, and `scarlett2_ports` meter ordering (`v7.2.15`) |
-| [alsa-scarlett-gui](https://github.com/geoffreybennett/alsa-scarlett-gui) | Geoffrey D. Bennett | GPL-3.0 | **Nothing.** Reference GTK4 GUI by the kernel driver's author; inspiration for grouping controls and matrix editing |
+| [alsa-scarlett-gui](https://github.com/geoffreybennett/alsa-scarlett-gui) | Geoffrey D. Bennett | GPL-3.0-or-later | **Nothing.** Reference GTK4 GUI by the kernel driver's author; inspiration for grouping controls and matrix editing |
+| Linux kernel `sound/usb/fcp.c` (Focusrite Control Protocol driver) | Geoffrey D. Bennett | GPL-2.0 | **No source code.** The kernel side that large Gen 4 interfaces (16i16, 18i16, 18i20) need for their mixer controls |
+| [fcp-support](https://github.com/geoffreybennett/fcp-support) (`fcp-server`) | Geoffrey D. Bennett | GPL-3.0 | **Nothing.** The userspace daemon those Gen 4 interfaces need; `scarlett-tui` tells users to run it when mixer controls are missing |
+| [scarlett2](https://github.com/geoffreybennett/scarlett2) | Geoffrey D. Bennett | GPL-3.0 | **Nothing.** Firmware management tool; the README points to it because `scarlett-tui` never flashes firmware |
 | [alsa-lib (`libasound`)](https://www.alsa-project.org/) | The ALSA Project | LGPL-2.1 | Dynamically linked at runtime via the public C `snd_ctl_*` ABI (`build.rs`) |
 
 ## Rust crate dependencies (in `Cargo.toml`)

@@ -42,10 +42,24 @@ Scarlett interfaces — input switches, 48V phantom power, output volumes and
 mutes, the internal routing patchbay, the `Mix A–F` mixer matrix, and real-time
 12-bit hardware level meters.
 
-The reference GUI (`alsa-scarlett-gui`) is great, and `alsamixer` works in a
-pinch, but if you live in the terminal (and on an Omarchy desktop) there was no
-dedicated TUI that shows the routing matrix, mix faders, live meters, and active
-PipeWire software links together in one place.
+The reference GUI ([`alsa-scarlett-gui`](https://github.com/geoffreybennett/alsa-scarlett-gui))
+is great, and `alsamixer` works in a pinch, but if you live in the terminal (and
+on an Omarchy desktop) there was no dedicated TUI that shows the routing matrix,
+mix faders, live meters, and active PipeWire software links together in one
+place.
+
+### Built on Geoffrey Bennett's work
+
+None of this would be possible without **Geoffrey D. Bennett**. He
+reverse-engineered Focusrite's USB protocols, wrote and maintains the Linux
+kernel's Scarlett2 and FCP drivers that `scarlett-tui` talks to, and builds
+[`alsa-scarlett-gui`](https://github.com/geoffreybennett/alsa-scarlett-gui),
+[`fcp-support`](https://github.com/geoffreybennett/fcp-support) (`fcp-server`)
+and the [`scarlett2`](https://github.com/geoffreybennett/scarlett2) firmware
+tool. `scarlett-tui` uses his driver's public ALSA controls and copies none of
+his code ([CREDITS.md](CREDITS.md)). If this project is useful to you, consider
+thanking him through
+[the donation links in his README](https://github.com/geoffreybennett/alsa-scarlett-gui#donations).
 
 ## Status and hardware support
 
