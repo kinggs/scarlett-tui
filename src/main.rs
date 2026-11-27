@@ -10,13 +10,13 @@ use std::process;
 
 fn print_help() {
     println!(
-        "scarlett-tui — Terminal mixer, router, live meters, and Omarchy plugin backend for Focusrite Scarlett\n\n\
+        "scarlett-tui — Terminal mixer, router and live meters for Focusrite Scarlett on Linux\n\n\
          USAGE:\n  \
            scarlett-tui [--card N]           Launch interactive TUI\n  \
            scarlett-tui --no-color           TUI without colour (also NO_COLOR=1 or TERM=dumb)\n  \
            scarlett-tui --ascii              TUI with ASCII glyphs and borders\n  \
            scarlett-tui --json [--card N]    Print current hardware state as JSON and exit\n  \
-           scarlett-tui --daemon [--card N]  Run JSON-lines daemon (used by Omarchy bar plugin)\n  \
+           scarlett-tui --daemon [--card N]  Run JSON-lines daemon (for bars and scripts)\n  \
            scarlett-tui --list               List detected Focusrite USB cards\n  \
            scarlett-tui --help               Show this help"
     );

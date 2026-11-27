@@ -1,9 +1,17 @@
 # Design rules
 
 These rules govern how `scarlett-tui` (the Ratatui TUI in `src/ui.rs`) and the
-Omarchy bar plugin (`Panel.qml`) show state. Both surfaces follow the active
-Omarchy theme and own no palette, so there is no separate design system: this
-file is it.
+Omarchy bar panel (`Panel.qml`) show state. Neither surface owns a palette, so
+there is no separate design system: this file is it.
+
+- **The TUI runs in any terminal on any Linux.** It uses only the 16 ANSI
+  colours, so it follows whatever theme the terminal has. Where this file
+  quotes a contrast figure or a theme name, that is where it was measured
+  (Omarchy's Tokyo Night and Catppuccin Latte terminal themes), not a
+  requirement.
+- **The panel runs only in the Omarchy shell.** It follows the Omarchy theme
+  through `Commons.Color`. The "Panel" columns and sections below apply only
+  there.
 
 **This file wins over any drawing.** The
 [design canvas](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru) holds the
@@ -23,7 +31,7 @@ Kenny ruled on these on 27 November 2026. Change them only with a new ruling.
 
 | Topic | Ruling |
 |---|---|
-| TUI size | Design for the 95×30 floating window (`TUI.float`, 875×600 px ≈ 100×30 cells ⚠ estimated). Under 80×24, show a centred "terminal too small" message instead of a broken layout. |
+| TUI size | Design for a 95×30 terminal. That is the size of Omarchy's floating TUI window (`TUI.float`, 875×600 px ≈ 100×30 cells ⚠ estimated), and a sensible small window anywhere. Under 80×24, show a centred "terminal too small" message instead of a broken layout. |
 | 48V | Enabling always takes two steps: arm, then confirm within 3 s. Same in the TUI and the panel. No setting turns this off. Disabling is one step. |
 | Bar mouse | Left-click opens the panel. Right-click (and middle-click) opens the TUI. Scroll does nothing, so a stray scroll never changes a level. The tooltip says so. |
 | Design system | None. Rules live here; the canvas's tokens board is the drawing. |
@@ -61,7 +69,8 @@ keys pass. Boards:
    never colour alone.
 5. **Device vs software.** Hardware routing uses cyan. PipeWire graph links use
    magenta. Tab 5 never borrows Tab 3's colour.
-6. **No Black, no RGB.** Omarchy maps ANSI Black to the background. No hex
+6. **No Black, no RGB.** Themes may map ANSI Black to the background, as
+   Omarchy's do, which makes Black text invisible. No hex
    colours in `src/ui.rs`; no `"#` colour literals in `Panel.qml`. In the panel,
    use only `Commons.Color` roles (`foreground`, `background`, `accent`,
    `urgent`, `muted`) and blends of them.
