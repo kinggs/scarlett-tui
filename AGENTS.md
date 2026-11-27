@@ -24,6 +24,7 @@ backend that `Panel.qml` talks to over JSON-lines.
 | `manifest.json` | Omarchy plugin manifest (`id: io.github.kinggs.scarlett-tui`) at repo root for marketplace compatibility |
 | `Panel.qml` | Omarchy bar widget + `KeyboardPanel` popup using `qs.Ui` and `qs.Commons` |
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |
+| `docs/DESIGN.md` | Design rules for both surfaces: rulings, semantic state table, glyphs, meter zones, keymap, layout |
 | `docs/HARDWARE-TESTING.md` | Agent-first, read-only playbook for verifying new Scarlett / Clarett / Vocaster hardware and submitting fixture PRs |
 | `Makefile` | `build`, `test`, `lint`, `check-toolchain`, `check-plugin`, `install`, `install-plugin`, `uninstall` |
 
@@ -51,6 +52,14 @@ backend that `Panel.qml` talks to over JSON-lines.
     remains valid for the Omarchy Plugin Marketplace.
 - **ANSI palette colours only in `src/ui.rs`.** Avoid hardcoded RGB hex colours
   in the TUI so it follows whichever terminal / Omarchy theme is active.
+- **DarkGray is decoration only.** Use `Color::DarkGray` for borders, the empty
+  meter track and `·`, never for text a user must read; secondary text is
+  `Color::Reset` + `Modifier::DIM`. Omarchy maps it to `muted`, measured at
+  1.9:1 contrast ([docs/DESIGN.md](docs/DESIGN.md)).
+- **No state by colour alone.** Every state pairs its colour with a glyph, a
+  word, a modifier or a badge, because yellow and magenta are 2.3:1 in light
+  themes. The state table is in [docs/DESIGN.md](docs/DESIGN.md), which wins
+  over any drawing.
 - **Stable Rust only.** `rust-toolchain.toml` and `mise.toml` must name the same
   stable version (`make check-toolchain`).
 - **Privacy & cleanliness:** Never commit device serial numbers, `/home/<user>`
