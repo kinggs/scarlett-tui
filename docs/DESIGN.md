@@ -11,6 +11,12 @@ wireframes and the critique; its character counts are approximate. When a
 drawing and this file disagree, follow this file and fix the drawing later.
 Background: [issue #6](https://github.com/kinggs/scarlett-tui/issues/6).
 
+The canvas is public. Each board has its own link: add
+`#artboard-<board>` to the canvas URL, for example
+[`#artboard-Tokens`](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru#artboard-Tokens)
+(states), `#artboard-TUI-Narrow-IO` (95×30 I/O) or `#artboard-Panel-BarStates`
+(bar icon). A pull request links the boards it implements.
+
 ## Rulings
 
 Kenny ruled on these on 27 November 2026. Change them only with a new ruling.

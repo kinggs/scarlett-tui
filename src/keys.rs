@@ -297,13 +297,7 @@ pub const KEYMAP: &[Binding] = &[
     ),
     // Safety: documented here, handled by the armed-action logic.
     b(Scope::Safety, "Space Space", "enable 48V (I/O)", None, &[]),
-    b(
-        Scope::Safety,
-        "0 0",
-        "unity when the rise is > +6 dB",
-        None,
-        &[],
-    ),
+    b(Scope::Safety, "0 0", "unity, rise over +6 dB", None, &[]),
     b(Scope::Safety, "Esc", "cancel an armed action", None, &[]),
     b(
         Scope::Safety,
