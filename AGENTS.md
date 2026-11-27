@@ -33,11 +33,13 @@ event-driven `--daemon` JSON-lines interface.
 | `src/pipewire.rs` | Read-only `pw-link -l -I` parser and `pw-link -d` disconnect helper |
 | `src/daemon.rs` | Event-driven JSON-lines daemon (`poll()` on stdin + ALSA control FDs + optional 20 Hz meter stream) |
 | `src/ui.rs` | 5-tab Ratatui TUI using standard ANSI terminal colours |
+| `src/screenshot_svg.rs` | Test-only SVG painter for the README screenshots; the only file with RGB colours |
 | `manifest.json` | Omarchy plugin manifest (`id: io.github.kinggs.scarlett-tui`) at repo root for marketplace compatibility |
 | `Panel.qml` | Omarchy bar widget + `KeyboardPanel` popup using `qs.Ui` and `qs.Commons` |
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |
 | `docs/DESIGN.md` | Design rules for both surfaces: rulings, semantic state table, glyphs, meter zones, keymap, layout |
 | `design/tui-*.svg`, `design/tui-*.png` | README screenshots, rendered from the `model_demo` fixture by `make screenshots`. The SVGs are the checked source; the PNGs are what the README shows |
+| `design/panel.png` | README picture of the bar panel: a screen capture from a live shell, updated by hand (`make screenshots` cannot render QML) |
 | `scripts/render-screenshots.sh` | Converts `design/tui-*.svg` to PNG for `make screenshots` |
 | `docs/HARDWARE-TESTING.md` | Agent-first, read-only playbook for verifying new Scarlett / Clarett / Vocaster hardware and submitting fixture PRs |
 | `Makefile` | `build`, `test`, `lint`, `check-toolchain`, `check-plugin`, `install`, `install-plugin`, `uninstall` |

@@ -1,0 +1,2 @@
+# The README screenshots are compared byte for byte by `make test`.
+design/*.svg text eol=lf

@@ -31,7 +31,7 @@ Kenny ruled on these on 27 November 2026. Change them only with a new ruling.
 
 | Topic | Ruling |
 |---|---|
-| TUI size | Design for a 95×30 terminal. That is the size of Omarchy's floating TUI window (`TUI.float`, 875×600 px ≈ 100×30 cells ⚠ estimated), and a sensible small window anywhere. Under 80×24, show a centred "terminal too small" message instead of a broken layout. |
+| TUI size | Design for a 95×30 terminal. Omarchy's floating TUI window (`TUI.float`, 875×600 px) holds more: measured at 113×35 cells in foot with Omarchy's default JetBrainsMono Nerd Font 9 pt, on a 1.6×-scaled display (the first estimate, ≈100×30, was low). 95×30 stays the target: it fits there with room, and is a sensible small window anywhere. Under 80×24, show a centred "terminal too small" message instead of a broken layout. |
 | 48V | Enabling always takes two steps: arm, then confirm within 3 s. Same in the TUI and the panel. No setting turns this off. Disabling is one step. |
 | Bar mouse | Left-click opens the panel. Right-click (and middle-click) opens the TUI. Scroll does nothing, so a stray scroll never changes a level. The tooltip says so. |
 | Design system | None. Rules live here; the canvas's tokens board is the drawing. |
@@ -71,7 +71,9 @@ keys pass. Boards:
    magenta. Tab 5 never borrows Tab 3's colour.
 6. **No Black, no RGB.** Themes may map ANSI Black to the background, as
    Omarchy's do, which makes Black text invisible. No hex
-   colours in `src/ui.rs`; no `"#` colour literals in `Panel.qml`. In the panel,
+   colours in `src/ui.rs` (a unit test checks); no `"#` colour literals in
+   `Panel.qml`. The README screenshots need a concrete theme, so their
+   painter lives apart, in the test-only `src/screenshot_svg.rs`. In the panel,
    use only `Commons.Color` roles (`foreground`, `background`, `accent`,
    `urgent`, `muted`) and blends of them.
 
@@ -92,8 +94,8 @@ a glyph, a word, a modifier or a badge.
 | 48V armed | Badge ` ARM 48V? ` (`bg Yellow`) and a countdown | "Click again to enable 48V" for 3 s | Esc or timeout cancels. |
 | Clipping (latched) | Badge `CLIP` (`bg Red`) until `C` | Urgent dot on the meter row and a ring on the bar icon | Panel clears on click. |
 | Muted output | Badge `MUTED` (`bg Red`); level bar becomes DarkGray | `MUTE` button filled urgent; live is a quiet outline | Label is always `MUTE`. |
-| Read-only | `DIM` value + `⊘`; "read-only" hint on focus | `enabled: false`, opacity 0.45, tooltip "Set on device" | Replaces `[RO]`. No emoji. |
-| Unknown value | `?` in Yellow `BOLD` | `—` with a tooltip | Control exists, value unreadable. |
+| Read-only | `DIM` value + `⊘`; "read-only" hint on focus | `enabled: false`, opacity 0.45, tooltip "Set on device" | Replaces `[RO]`. No emoji. A disabled control gets no hover, so the panel lays a hover-only `Hint` over it for the tooltip. |
+| Unknown value | `?` in Yellow `BOLD` | `—` in the control (`48V —`, `MUTE —`, `INST —`) and a "could not be read" tooltip | Control exists, value unreadable. |
 | Mixer unavailable | Yellow `▲` header; body shows fix steps | Icon dim + `!` badge; panel shows fix steps | Device present, no controls. |
 | Disconnected | Red `✕` header; centred empty state | Slashed glyph `󰓄`, opacity 0.45 | Distinct from backend down (panel only). |
 | PipeWire link | Magenta type tag; loopback `⟲ loopback` | Not shown; the PipeWire graph is in the TUI | Software, not stored on the interface. |
@@ -106,14 +108,20 @@ a glyph, a word, a modifier or a badge.
 | `░` | empty meter track (DarkGray) | `-` |
 | `│` | peak-hold tick; column rule | `\|` |
 | `●` / `○` | current / other choice; sync locked | `*` / `o` |
-| `■` / `□` | on / off | `[x]` / `[ ]` |
+| `■` / `□` | on / off | `x` / `.` (a cell holds one character) |
 | `▲` | caution | `!` |
 | `✕` | disconnected or error | `x` |
-| `⊘` | read-only | `RO` |
+| `⊘` | read-only | `/` |
 | `·` | −∞ in the matrix and meters | `.` |
 | `⟲` | PipeWire loopback | `~` |
 | `◂ N` / `N ▸` | N columns hidden left / right | `< N` / `N >` |
 | `↓ N more` | N rows hidden below | `v N more` |
+| `─` `┌` `┐` … | box drawing | `-` and `+` |
+| `−` `—` | minus, unknown | `-` |
+| anything else | | `?` |
+
+`--ascii` replaces one cell with one character, so every fallback is a
+single character; `ascii_for` in `src/ui.rs` is the full list.
 
 ## Meter zones
 
@@ -121,15 +129,29 @@ Both surfaces use the same thresholds.
 
 | Zone | Range | TUI | Panel |
 |---|---|---|---|
-| Signal | below −9 dBFS | Green | `Commons.Color.accent` |
-| Hot | −9 to −1 dBFS | Yellow | `Qt.tint(accent, alpha(urgent, 0.5))` |
+| Signal | below −6 dBFS | Green | `Commons.Color.accent` |
+| Hot | −6 to −1 dBFS | Yellow | `Qt.tint(accent, alpha(urgent, 0.5))` |
 | Clip | −1 dBFS and above | Red, and latch `CLIP` | `Commons.Color.urgent`, and latch the clip dot |
 
 - The peak-hold tick `│` holds for 1.5 s, then falls.
 - A clip latches until cleared (`C` in the TUI, click in the panel).
 - The scale row reads −48 −24 −12 −6 −3 0.
-- ⚠ Focusrite's Gain Halo scale runs −42 to 0 dBFS; its zone boundaries are
-  not confirmed, so aligning to it is a follow-up.
+- **Why these numbers.** Hot starts at −6 dBFS, where Focusrite's 3rd Gen
+  Gain Halo turns amber
+  ([Scarlett 2i2 3rd Gen user guide](https://fael-downloads-prod.focusrite.com/customer/prod/downloads/Scarlett%202i2%203rd%20Gen%20User%20Guide%20V2.pdf):
+  green from −24, amber from −6, red at 0 dBFS). The halo goes red only at
+  0 dBFS; the clip latch fires at −1 dBFS on purpose, as an early warning.
+  Below −24 the halo is dark, but a meter still shows the level, so there is
+  no separate zone for it.
+- ⚠ The 4th Gen guides draw a halo scale from −42 to 0 dBFS (steps −42 −36
+  −24 −18 −12 −6 0) but give no colour boundaries, so the 3rd Gen values
+  stand for every model.
+- ⚠ With the panel closed, the daemon reads the meters every 200 ms to latch
+  clips. The kernel driver asks the device afresh on each read and holds no
+  peak; nothing public says whether the device's firmware holds a peak
+  between reads. If it does not, a clip shorter than 200 ms can be missed
+  until the panel opens (it reads at 20 Hz while open). Not tested on
+  hardware.
 
 ## Level-jump guard
 
@@ -230,8 +252,11 @@ as one "activate", so in the panel Enter also toggles and arms 48V.
   rate · 48V badge · clip badge · model. USB ID and firmware drop out below
   120 columns and move to the help overlay's About block.
 - **Overview:** meters only, in groups (outputs, inputs, mixer inputs). A row
-  ends with the state that explains its meter: `← source` for an output,
-  `MUTED`, `48V`, `CLIP`. With more channels than rows, the last line reads
+  ends with the state that explains its meter: `CLIP`, then for a row fed by
+  an analogue input that input's ` 48V ` badge, `Inst` and `Air` (words, in
+  fixed slots), then `MUTED` or `← source`. "Analogue N" in the source names
+  the input; the panel finds an input's meter the same way
+  (`ScarlettModel::input_meter`). With more channels than rows, the last line reads
   `↓ N more`.
 - **I/O:** a board, not a table. Sections: Inputs, Phantom power, Outputs,
   Device. One row per channel with its controls across; `h` / `l` step between

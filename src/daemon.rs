@@ -69,6 +69,9 @@ struct InputSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     gain_db: Option<f64>,
     toggles: Vec<ToggleSummary>,
+    /// Index of the meter that shows this input (`ScarlettModel::input_meter`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    meter: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +84,9 @@ struct OutputSummary {
     mute_numid: Option<u32>,
     mute_rw: bool,
     muted: bool,
+    /// The mute switch exists but its value could not be read.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    mute_unknown: bool,
     route_numid: Option<u32>,
     route_rw: bool,
     route: String,
@@ -391,6 +397,7 @@ fn build_snapshot<'a>(
                 gain_numid: inp.gain_numid,
                 gain_db,
                 toggles,
+                meter: model.input_meter(inp.index),
             }
         })
         .collect();
@@ -422,6 +429,7 @@ fn build_snapshot<'a>(
             let db = vol_ctrl.and_then(|c| c.current_db());
             let volume_rw = vol_ctrl.map(|c| c.is_editable()).unwrap_or(false);
             let muted = mute_ctrl.map(|c| c.bool_val()).unwrap_or(false);
+            let mute_unknown = mute_ctrl.is_some_and(|c| c.opt_bool_val().is_none());
             let mute_rw = mute_ctrl.map(|c| c.is_editable()).unwrap_or(false);
             let route_entry = model
                 .routes
@@ -451,6 +459,7 @@ fn build_snapshot<'a>(
                 mute_numid: out.mute_numid,
                 mute_rw,
                 muted,
+                mute_unknown,
                 route_numid,
                 route_rw,
                 route,
@@ -1014,6 +1023,18 @@ mod tests {
         assert_eq!(v["type"], "clip");
         assert_eq!(v["clip"], serde_json::json!([false, true]));
         assert_eq!(v["clip_any"], true);
+    }
+
+    #[test]
+    fn snapshot_names_each_inputs_meter() {
+        let model = crate::model::fixtures::model_demo();
+        let v = serde_json::to_value(build_snapshot(&model, 1, 0)).unwrap();
+        let inputs = v["inputs"].as_array().unwrap();
+        assert_eq!(inputs[0]["label"], "Input 1");
+        assert_eq!(inputs[0]["meter"], 12, "Input 1 → PC capture 1's meter");
+        assert_eq!(inputs[1]["meter"], 13);
+        // The panel reads the meter's source name from meter_labels.
+        assert_eq!(v["meter_labels"][12]["source"], "Analogue 1");
     }
 
     #[test]
