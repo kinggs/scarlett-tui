@@ -149,6 +149,51 @@ Panel {
     return out
   }
 
+  // One block per channel (docs/DESIGN.md "Layout: Panel"): a channel's meter
+  // sits in its own row. A meter is matched by name, never by position, and a
+  // row with no match simply has no meter.
+  function outputMeter(out) {
+    var label = String((out && out.label) || "")
+    for (var i = 0; i < meterLabels.length; i++) {
+      var m = meterLabels[i]
+      if (m && m.group === "Analogue Outputs" && String(m.label || "") === label) return m.index
+    }
+    return -1
+  }
+
+  // An analogue input has no meter of its own, so use the capture or mixer
+  // channel it feeds, found by its source name.
+  function inputMeter(inp) {
+    var n = String((inp && inp.label) || "").match(/(\d+)\s*$/)
+    if (!n) return -1
+    var src = "Analogue " + Number(n[1])
+    for (var i = 0; i < meterLabels.length; i++) {
+      var m = meterLabels[i]
+      if (m && String(m.source || "") === src
+          && (m.group === "PC Capture (Rec)" || m.group === "Mixer Inputs")) return m.index
+    }
+    return -1
+  }
+
+  // True when the outputs carry their own meters. Otherwise (models whose
+  // meters have neutral names) the separate LEVELS list is shown instead.
+  readonly property bool metersInRows: {
+    for (var i = 0; i < outputs.length; i++) if (outputMeter(outputs[i]) >= 0) return true
+    return false
+  }
+
+  // The ? key shows the key list in the footer.
+  property bool showKeys: false
+  readonly property var keyHelp: [
+    ["↑ ↓ ← →", "move (also h j k l)"],
+    ["Space", "toggle · 48V takes two"],
+    ["Enter", "open an output's sources · set"],
+    ["m", "mute the output under the cursor"],
+    ["C", "clear clip latches"],
+    ["r / T", "refresh / open the TUI"],
+    ["Esc", "collapse, then close"]
+  ]
+
   // Stereo pairs: neighbours in the same group share one row with two bars.
   readonly property var meterPairs: {
     var v = visibleMeters
@@ -456,6 +501,7 @@ Panel {
     armedPhantom = -1
     navCursor = -1
     routeCursor = -1
+    showKeys = false
     if (opened) {
       send("refresh")
       send("meters on")
@@ -603,6 +649,8 @@ Panel {
         if (t === "t" || t === "T") root.openTui()
         else if (t === "r" || t === "R") root.send("refresh")
         else if (t === "m" || t === "M") root.muteCursor()
+        else if (t === "c" || t === "C") root.clearClips()
+        else if (t === "?") root.showKeys = !root.showKeys
       }
 
       ScrollView {
@@ -728,13 +776,14 @@ Panel {
           }
 
           // ---------- Live Hardware Meters ----------
+          // Shown only when the meters cannot be matched to output rows.
           PanelSeparator {
-            visible: root.connected && root.mixerAvailable && root.visibleMeters.length > 0
+            visible: root.connected && root.mixerAvailable && !root.metersInRows && root.visibleMeters.length > 0
             foreground: root.fg
           }
 
           Column {
-            visible: root.connected && root.mixerAvailable && root.visibleMeters.length > 0
+            visible: root.connected && root.mixerAvailable && !root.metersInRows && root.visibleMeters.length > 0
             width: parent.width
             spacing: Style.space(5)
 
@@ -866,10 +915,18 @@ Panel {
             Repeater {
               model: root.inputs
 
-              Row {
-                id: inRow
+              Column {
+                id: inBlock
                 required property var modelData
                 required property int index
+                readonly property int meterIdx: root.metersInRows ? root.inputMeter(modelData) : -1
+                width: panelColumn.width
+                spacing: Style.space(3)
+
+              Row {
+                id: inRow
+                readonly property var modelData: inBlock.modelData
+                readonly property int index: inBlock.index
                 width: panelColumn.width
                 spacing: Style.space(6)
 
@@ -921,6 +978,40 @@ Panel {
                     }
                   }
                 }
+              }
+
+              // The input's own meter, under its chips.
+              Row {
+                visible: inBlock.meterIdx >= 0
+                width: panelColumn.width
+                spacing: Style.space(8)
+
+                Item { width: Style.space(92) - Style.space(8); height: 1 }
+
+                MeterTrack {
+                  width: panelColumn.width - Style.space(92) - Style.space(66)
+                  idx: inBlock.meterIdx
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                Text {
+                  width: Style.space(42)
+                  horizontalAlignment: Text.AlignRight
+                  textFormat: Text.PlainText
+                  text: root.meterDbText(inBlock.meterIdx)
+                  color: Util.alpha(root.fg, 0.66)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Rectangle {
+                  width: Style.space(8)
+                  height: width
+                  radius: width / 2
+                  color: root.clipFlags[inBlock.meterIdx] ? Commons.Color.urgent : "transparent"
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+              }
               }
             }
 
@@ -1005,7 +1096,7 @@ Panel {
 
               PanelSectionHeader {
                 id: outHdr
-                text: "OUTPUT ROUTING"
+                text: "OUTPUTS"
                 foreground: root.fg
                 fontFamily: root.fontFamily
                 anchors.left: parent.left
@@ -1073,6 +1164,40 @@ Panel {
                         font.pixelSize: Style.font.caption
                         elide: Text.ElideRight
                         width: parent.width
+                      }
+
+                      // The output's own meter: one block per channel.
+                      Row {
+                        id: outMeter
+                        readonly property int idx: root.outputMeter(modelData)
+                        visible: idx >= 0
+                        width: parent.width
+                        spacing: Style.space(8)
+                        topPadding: Style.space(3)
+
+                        MeterTrack {
+                          width: parent.width - Style.space(66)
+                          idx: outMeter.idx
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
+
+                        Text {
+                          width: Style.space(42)
+                          horizontalAlignment: Text.AlignRight
+                          textFormat: Text.PlainText
+                          text: root.meterDbText(outMeter.idx)
+                          color: Util.alpha(root.fg, 0.66)
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.caption
+                        }
+
+                        Rectangle {
+                          width: Style.space(8)
+                          height: width
+                          radius: width / 2
+                          color: root.clipFlags[outMeter.idx] ? Commons.Color.urgent : "transparent"
+                          anchors.verticalCenter: parent.verticalCenter
+                        }
                       }
                     }
 
@@ -1186,7 +1311,7 @@ Panel {
             }
           }
 
-          // ---------- Footer: status line (the hero TUI button opens the TUI) ----------
+          // ---------- Footer: the key line; ? opens the key list ----------
           PanelSeparator {
             visible: root.connected && root.mixerAvailable
             foreground: root.fg
@@ -1198,24 +1323,54 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              visible: !root.showKeys
               width: parent.width
               textFormat: Text.PlainText
-              text: "PipeWire " + root.pwScarlettLinks + (root.pwScarlettLinks === 1 ? " link" : " links")
-                + (root.hasMatrix ? " · Matrix " + root.matrixSize : "")
-              color: root.fg
+              text: "↑↓ move · Space toggle · m mute · ? keys"
+              color: Util.alpha(root.fg, 0.66)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
             }
 
+            Repeater {
+              model: root.showKeys ? root.keyHelp : []
+
+              Row {
+                required property var modelData
+                width: panelColumn.width
+                spacing: Style.space(8)
+
+                Text {
+                  width: Style.space(92) - Style.space(8)
+                  textFormat: Text.PlainText
+                  text: String(modelData[0])
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Text {
+                  width: parent.width - Style.space(92)
+                  textFormat: Text.PlainText
+                  text: String(modelData[1])
+                  color: Util.alpha(root.fg, 0.66)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
             Text {
+              visible: root.showKeys
               width: parent.width
               textFormat: Text.PlainText
-              text: "↑↓ move · Enter sources · Space toggle · m mute · T TUI"
+              text: "? closes this list"
               color: Util.alpha(root.fg, 0.66)
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
-              elide: Text.ElideRight
             }
           }
         }
