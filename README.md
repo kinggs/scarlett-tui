@@ -40,7 +40,7 @@ clip, muted headphones and a worked mix. They are not a capture of a session.
 They are painted in the Tokyo Night palette (the TUI itself uses only the 16
 ANSI colours, so it follows whatever theme your terminal has). `make screenshots` regenerates
 them without hardware, and `make test` fails when they fall behind the code.
-⚠ The Omarchy bar panel is not pictured yet.
+The bar panel's picture is a capture instead (below).
 
 ## Why this exists
 
@@ -227,6 +227,14 @@ This builds and installs `~/.local/bin/scarlett-tui`, updates the desktop entry
 for `omarchy-launch-or-focus-tui`, validates `manifest.json` and `Panel.qml`,
 links the repository into `~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui`,
 and enables the bar widget on the right section of the Omarchy bar.
+
+<p align="center">
+  <img src="design/panel.png" alt="The bar panel, 400 px wide: model name and Locked · 48 kHz · Gen 3; INPUTS with Line, Air and Pad chips and a meter per input; 48V off and Remember 48V; OUTPUTS with each line's source, meter, level and MUTE button; the key line at the foot" width="335">
+</p>
+
+<p align="center"><em>The bar panel in a running Omarchy shell, on a Scarlett
+4i4 Gen 3. A screen capture, not rendered from the demo fixture, so update it
+by hand when the panel's look changes.</em></p>
 
 *(If you added the repository via `omarchy plugin add https://github.com/kinggs/scarlett-tui.git`,
 run `cd ~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui && make install`

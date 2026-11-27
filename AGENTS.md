@@ -39,6 +39,7 @@ event-driven `--daemon` JSON-lines interface.
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |
 | `docs/DESIGN.md` | Design rules for both surfaces: rulings, semantic state table, glyphs, meter zones, keymap, layout |
 | `design/tui-*.svg`, `design/tui-*.png` | README screenshots, rendered from the `model_demo` fixture by `make screenshots`. The SVGs are the checked source; the PNGs are what the README shows |
+| `design/panel.png` | README picture of the bar panel: a screen capture from a live shell, updated by hand (`make screenshots` cannot render QML) |
 | `scripts/render-screenshots.sh` | Converts `design/tui-*.svg` to PNG for `make screenshots` |
 | `docs/HARDWARE-TESTING.md` | Agent-first, read-only playbook for verifying new Scarlett / Clarett / Vocaster hardware and submitting fixture PRs |
 | `Makefile` | `build`, `test`, `lint`, `check-toolchain`, `check-plugin`, `install`, `install-plugin`, `uninstall` |
