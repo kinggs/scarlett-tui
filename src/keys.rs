@@ -101,36 +101,42 @@ pub const KEYMAP: &[Binding] = &[
         Some("clear clips"),
         &[(K::Char('C'), A::ClearClips)],
     ),
-    // I/O tab
-    b(Scope::Io, "j/k", "move", Some("move"), MOVE_ROWS),
+    // I/O tab: a board, so h/l move between a row's controls.
     b(
         Scope::Io,
-        "h/l",
-        "−/+ 1 dB, or previous / next value",
-        Some("±1 dB"),
+        "h j k l",
+        "move (never changes a value)",
+        Some("move"),
         &[
-            (K::Char('h'), A::Dec),
-            (K::Left, A::Dec),
-            (K::Char('-'), A::Dec),
-            (K::Char('l'), A::Inc),
-            (K::Right, A::Inc),
-            (K::Char('+'), A::Inc),
-            (K::Char('='), A::Inc),
+            (K::Char('h'), A::Left),
+            (K::Left, A::Left),
+            (K::Char('j'), A::Down),
+            (K::Down, A::Down),
+            (K::Char('k'), A::Up),
+            (K::Up, A::Up),
+            (K::Char('l'), A::Right),
+            (K::Right, A::Right),
         ],
     ),
     b(
         Scope::Io,
-        "H/L",
-        "−/+ 6 dB",
-        Some("±6 dB"),
-        &[(K::Char('H'), A::DecBig), (K::Char('L'), A::IncBig)],
+        "- +",
+        "−/+ 1 dB, or previous / next choice",
+        Some("±1 dB"),
+        &[
+            (K::Char('-'), A::Dec),
+            (K::Char('['), A::Dec),
+            (K::Char('+'), A::Inc),
+            (K::Char('='), A::Inc),
+            (K::Char(']'), A::Inc),
+        ],
     ),
     b(
         Scope::Io,
-        "Space",
-        "toggle or cycle (48V: press twice)",
-        Some("toggle"),
-        &[(K::Char(' '), A::Toggle), (K::Enter, A::Toggle)],
+        "{ }",
+        "−/+ 6 dB",
+        Some("±6 dB"),
+        &[(K::Char('{'), A::DecBig), (K::Char('}'), A::IncBig)],
     ),
     b(
         Scope::Io,
@@ -142,9 +148,25 @@ pub const KEYMAP: &[Binding] = &[
     b(
         Scope::Io,
         "m",
-        "mute output, or minimum level",
+        "mute this row's output",
         Some("mute"),
         &[(K::Char('m'), A::Mute)],
+    ),
+    b(
+        Scope::Io,
+        "Space",
+        "toggle (48V: press twice)",
+        Some("toggle"),
+        &[(K::Char(' '), A::Toggle)],
+    ),
+    // Enter toggles like Space, except that it never arms 48V. It has no
+    // footer hint; the overlay documents it.
+    b(
+        Scope::Io,
+        "Enter",
+        "toggle, but never 48V",
+        None,
+        &[(K::Enter, A::Confirm)],
     ),
     // Device routing tab
     b(Scope::Routing, "j/k", "move", Some("move"), MOVE_ROWS),
@@ -442,7 +464,7 @@ mod tests {
     #[test]
     fn lookup_falls_back_to_global_except_in_modals() {
         assert_eq!(lookup(Scope::Io, K::Char('q')), Some(Action::Quit));
-        assert_eq!(lookup(Scope::Io, K::Char('L')), Some(Action::IncBig));
+        assert_eq!(lookup(Scope::Io, K::Char('}')), Some(Action::IncBig));
         assert_eq!(lookup(Scope::Matrix, K::Char('3')), Some(Action::GoTab(2)));
         assert_eq!(lookup(Scope::Overview, K::Char('?')), Some(Action::Help));
         assert_eq!(
@@ -454,6 +476,27 @@ mod tests {
         assert_eq!(lookup(Scope::Picker, K::Char('q')), Some(Action::Cancel));
         assert_eq!(lookup(Scope::Picker, K::Char('1')), None);
         assert_eq!(lookup(Scope::Help, K::Char('r')), None);
+    }
+
+    /// docs/DESIGN.md "One vocabulary": on the I/O board h/l only move.
+    #[test]
+    fn io_move_keys_never_map_to_a_value_change() {
+        for (k, a) in [
+            ('h', Action::Left),
+            ('l', Action::Right),
+            ('j', Action::Down),
+            ('k', Action::Up),
+        ] {
+            assert_eq!(lookup(Scope::Io, K::Char(k)), Some(a));
+        }
+        assert_eq!(lookup(Scope::Io, K::Char('-')), Some(Action::Dec));
+        assert_eq!(lookup(Scope::Io, K::Char('+')), Some(Action::Inc));
+        assert_eq!(lookup(Scope::Io, K::Char('{')), Some(Action::DecBig));
+        // H/L are gone; Enter is not the 48V key.
+        assert_eq!(lookup(Scope::Io, K::Char('H')), None);
+        assert_eq!(lookup(Scope::Io, K::Char('L')), None);
+        assert_eq!(lookup(Scope::Io, K::Char(' ')), Some(Action::Toggle));
+        assert_eq!(lookup(Scope::Io, K::Enter), Some(Action::Confirm));
     }
 
     #[test]

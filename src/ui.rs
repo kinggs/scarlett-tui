@@ -66,10 +66,35 @@ impl Tab {
     }
 }
 
-struct IoItem {
+/// Section titles of the I/O board, in display order.
+const SEC_INPUTS: &str = "Inputs";
+const SEC_PHANTOM: &str = "Phantom power";
+const SEC_OUTPUTS: &str = "Outputs";
+const SEC_DEVICE: &str = "Device";
+
+/// One control on an I/O board row.
+struct IoCell {
+    /// Short name drawn before the value; empty when the row label says it all.
+    name: &'static str,
+    numid: u32,
+}
+
+/// One row of the I/O board: a channel (or a device setting) and its controls,
+/// laid out across. `h`/`l` step between `cells` (docs/DESIGN.md "Layout: I/O").
+struct IoRow {
     section: &'static str,
     label: String,
-    numid: u32,
+    cells: Vec<IoCell>,
+}
+
+impl IoRow {
+    /// The mute switch on this row, if it is an output row that has one.
+    fn mute_numid(&self) -> Option<u32> {
+        (self.section == SEC_OUTPUTS)
+            .then(|| self.cells.iter().find(|c| c.name == "Mute"))
+            .flatten()
+            .map(|c| c.numid)
+    }
 }
 
 struct RoutePicker {
@@ -320,6 +345,8 @@ pub struct App {
 
     // Per-tab cursors & remembered matrix levels for safe unmute
     io_cursor: usize,
+    /// Which control on the I/O row the cursor is on.
+    io_col: usize,
     route_cursor: usize,
     route_picker: Option<RoutePicker>,
     armed: Option<Armed>,
@@ -359,6 +386,7 @@ impl App {
             meter_peak_time: Vec::new(),
             clips: ClipLatch::default(),
             io_cursor: 0,
+            io_col: 0,
             route_cursor: 0,
             route_picker: None,
             armed: None,
@@ -398,6 +426,7 @@ impl App {
             meter_peak_time: vec![Instant::now(); n],
             clips: ClipLatch::default(),
             io_cursor: 0,
+            io_col: 0,
             route_cursor: 0,
             route_picker: None,
             armed: None,
@@ -427,12 +456,11 @@ impl App {
     fn clamp_cursors(&mut self) {
         self.route_picker = None;
         self.armed = None;
-        let io_len = self.io_items().len();
-        self.io_cursor = if io_len == 0 {
-            0
-        } else {
-            self.io_cursor.min(io_len - 1)
-        };
+        let rows = self.io_rows();
+        self.io_cursor = self.io_cursor.min(rows.len().saturating_sub(1));
+        self.io_col = rows
+            .get(self.io_cursor)
+            .map_or(0, |r| self.io_col.min(r.cells.len().saturating_sub(1)));
         if let Some(ref m) = self.model {
             self.route_cursor = if m.routes.is_empty() {
                 0
@@ -571,106 +599,85 @@ impl App {
             .collect()
     }
 
-    fn io_items(&self) -> Vec<IoItem> {
+    /// The I/O board's rows. Built from what the model discovered, so a row
+    /// only has the controls this device exposes, and rows with none are left out.
+    fn io_rows(&self) -> Vec<IoRow> {
         let Some(ref m) = self.model else {
             return Vec::new();
         };
-        let mut items = Vec::new();
+        let cell = |name: &'static str, id: Option<u32>| id.map(|numid| IoCell { name, numid });
+        let mut rows = Vec::new();
         for inp in &m.inputs {
-            if let Some(id) = inp.gain_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Gain", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.level_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Level (Line/Inst)", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.air_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Air", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.pad_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Pad", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.safe_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Clip Safe", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.autogain_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Autogain", inp.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = inp.link_numid {
-                items.push(IoItem {
-                    section: "Inputs",
-                    label: format!("{} Link", inp.label),
-                    numid: id,
+            let cells: Vec<IoCell> = [
+                cell("Gain", inp.gain_numid),
+                cell("Level", inp.level_numid),
+                cell("Air", inp.air_numid),
+                cell("Pad", inp.pad_numid),
+                cell("Safe", inp.safe_numid),
+                cell("Auto", inp.autogain_numid),
+                cell("Link", inp.link_numid),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !cells.is_empty() {
+                rows.push(IoRow {
+                    section: SEC_INPUTS,
+                    label: inp.label.clone(),
+                    cells,
                 });
             }
         }
+        // 48V and its settings get rows of their own, one control each, so
+        // h/l can never land on a phantom switch from another control.
         for &id in &m.phantom_numids {
             if let Some(c) = m.controls.get(&id) {
-                items.push(IoItem {
-                    section: "Phantom Power",
-                    label: c.name.replace(" Capture Switch", ""),
-                    numid: id,
+                // The section title already says "Phantom power".
+                let name = c.name.replace(" Capture Switch", "");
+                let label = name
+                    .strip_suffix(" Phantom Power")
+                    .or_else(|| name.strip_prefix("Phantom Power "))
+                    .unwrap_or(&name)
+                    .to_string();
+                rows.push(IoRow {
+                    section: SEC_PHANTOM,
+                    label,
+                    cells: vec![IoCell {
+                        name: "",
+                        numid: id,
+                    }],
                 });
             }
         }
         for out in &m.outputs {
-            if let Some(id) = out.volume_numid {
-                items.push(IoItem {
-                    section: "Outputs",
-                    label: format!("{} Volume", out.label),
-                    numid: id,
-                });
-            }
-            if let Some(id) = out.mute_numid {
-                items.push(IoItem {
-                    section: "Outputs",
-                    label: format!("{} Mute", out.label),
-                    numid: id,
+            let cells: Vec<IoCell> = [
+                cell("Volume", out.volume_numid),
+                cell("Mute", out.mute_numid),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !cells.is_empty() {
+                rows.push(IoRow {
+                    section: SEC_OUTPUTS,
+                    label: out.label.clone(),
+                    cells,
                 });
             }
         }
-        if let Some(id) = m.direct_monitor_numid
-            && let Some(c) = m.controls.get(&id)
-        {
-            items.push(IoItem {
-                section: "Device",
-                label: c.name.clone(),
-                numid: id,
-            });
-        }
-        for &id in &m.device_numids {
-            if let Some(c) = m.controls.get(&id) {
-                items.push(IoItem {
-                    section: "Device",
+        for id in m.direct_monitor_numid.iter().chain(&m.device_numids) {
+            if let Some(c) = m.controls.get(id) {
+                rows.push(IoRow {
+                    section: SEC_DEVICE,
                     label: c.name.clone(),
-                    numid: id,
+                    cells: vec![IoCell {
+                        name: "",
+                        numid: *id,
+                    }],
                 });
             }
         }
-        items
+        rows
     }
 
     /// Take one frame of raw meter values: update peak hold and clip latches.
@@ -1059,23 +1066,58 @@ impl App {
     }
 
     fn handle_io_key(&mut self, action: Action) {
-        let step_db = if matches!(action, Action::IncBig | Action::DecBig) {
-            6.0
-        } else {
-            1.0
-        };
-        let items = self.io_items();
-        if items.is_empty() {
+        let rows = self.io_rows();
+        if rows.is_empty() {
             return;
         }
-        if self.io_cursor >= items.len() {
-            self.io_cursor = items.len() - 1;
+        self.io_cursor = self.io_cursor.min(rows.len() - 1);
+        let row = &rows[self.io_cursor];
+        self.io_col = self.io_col.min(row.cells.len() - 1);
+
+        // Move keys never write (docs/DESIGN.md "One vocabulary").
+        match action {
+            Action::Up => {
+                self.io_cursor = self.io_cursor.saturating_sub(1);
+                self.io_col = self.io_col.min(rows[self.io_cursor].cells.len() - 1);
+                return;
+            }
+            Action::Down => {
+                self.io_cursor = (self.io_cursor + 1).min(rows.len() - 1);
+                self.io_col = self.io_col.min(rows[self.io_cursor].cells.len() - 1);
+                return;
+            }
+            Action::Left => {
+                self.io_col = self.io_col.saturating_sub(1);
+                return;
+            }
+            Action::Right => {
+                self.io_col = (self.io_col + 1).min(row.cells.len() - 1);
+                return;
+            }
+            _ => {}
         }
-        let item = &items[self.io_cursor];
+
+        // m mutes the row's output from any of its controls; it is the only
+        // mute, and does nothing on rows without a mute switch.
+        if action == Action::Mute {
+            let muted = row.mute_numid().and_then(|id| {
+                let m = self.model.as_ref()?;
+                Some((id, m.controls.get(&id)?.opt_bool_val()?))
+            });
+            if let Some((id, muted)) = muted
+                && self.write_control(id, if muted { 0 } else { 1 })
+            {
+                let word = if muted { "unmuted" } else { "muted" };
+                self.set_status(format!("{} {word}", row.label));
+            }
+            return;
+        }
+
+        let cell = &row.cells[self.io_col];
         let Some(ctrl) = self
             .model
             .as_ref()
-            .and_then(|m| m.controls.get(&item.numid))
+            .and_then(|m| m.controls.get(&cell.numid))
             .cloned()
         else {
             return;
@@ -1083,146 +1125,107 @@ impl App {
         let is_phantom = self
             .model
             .as_ref()
-            .is_some_and(|m| m.is_phantom_switch(item.numid));
+            .is_some_and(|m| m.is_phantom_switch(cell.numid));
+        let label = if cell.name.is_empty() {
+            row.label.clone()
+        } else {
+            format!("{} {}", row.label, cell.name)
+        };
+        let step_db = if matches!(action, Action::IncBig | Action::DecBig) {
+            6.0
+        } else {
+            1.0
+        };
+        let writes = matches!(
+            (action, ctrl.kind),
+            (Action::Toggle | Action::Confirm, _)
+                | (
+                    Action::Inc | Action::Dec,
+                    ControlKind::Int | ControlKind::Enum
+                )
+                | (
+                    Action::IncBig | Action::DecBig | Action::Unity,
+                    ControlKind::Int
+                )
+        );
+        if !writes {
+            return;
+        }
+        if !ctrl.is_editable() {
+            self.set_status(format!("'{}' is read-only", ctrl.name));
+            return;
+        }
 
-        match action {
-            Action::Up => {
-                self.io_cursor = self.io_cursor.saturating_sub(1);
-            }
-            Action::Down => {
-                if self.io_cursor + 1 < items.len() {
-                    self.io_cursor += 1;
-                }
-            }
-            Action::Toggle => {
-                if !ctrl.is_editable() {
-                    self.set_status(format!("'{}' is read-only", ctrl.name));
+        match (action, ctrl.kind) {
+            // Space toggles a switch. Enter does the same, except on 48V:
+            // only Space arms and confirms phantom power.
+            (Action::Toggle | Action::Confirm, ControlKind::Bool) => {
+                let Some(on) = ctrl.opt_bool_val() else {
                     return;
-                }
-                match ctrl.kind {
-                    ControlKind::Bool => {
-                        if let Some(b) = ctrl.opt_bool_val() {
-                            if !b && is_phantom {
-                                // 48V takes two steps to enable, one to disable.
-                                self.arm(ArmedAction::Phantom {
-                                    numid: ctrl.numid,
-                                    label: item.label.clone(),
-                                });
-                            } else {
-                                self.write_control(ctrl.numid, if b { 0 } else { 1 });
-                            }
-                        }
+                };
+                if !on && is_phantom {
+                    if action == Action::Toggle {
+                        self.arm(ArmedAction::Phantom {
+                            numid: ctrl.numid,
+                            label,
+                        });
+                    } else {
+                        self.set_status("48V: press Space, then Space again");
                     }
-                    ControlKind::Enum => {
-                        if !ctrl.items.is_empty()
-                            && let Some(cur) = ctrl.opt_val()
-                        {
-                            let next = (cur + 1) % ctrl.items.len() as i64;
-                            self.write_control(ctrl.numid, next);
-                        }
-                    }
-                    ControlKind::Int => {
-                        // Do not jump integer gain controls on Enter/Space — use h/l or 0.
-                        self.set_status("Use h/l (±1 dB), H/L (±6 dB), 0 for unity, m to mute");
-                    }
+                } else {
+                    self.write_control(ctrl.numid, if on { 0 } else { 1 });
                 }
             }
-            Action::Inc | Action::IncBig => {
-                if !ctrl.is_editable() {
-                    self.set_status(format!("'{}' is read-only", ctrl.name));
-                    return;
-                }
-                match ctrl.kind {
-                    ControlKind::Bool if is_phantom => {
-                        if ctrl.opt_bool_val() == Some(false) {
-                            self.arm(ArmedAction::Phantom {
-                                numid: ctrl.numid,
-                                label: item.label.clone(),
-                            });
-                        }
-                    }
-                    ControlKind::Bool => {
-                        self.write_control(ctrl.numid, 1);
-                    }
-                    ControlKind::Enum => {
-                        if let Some(cur) = ctrl.opt_val() {
-                            self.write_control(ctrl.numid, (cur + 1).min(ctrl.max));
-                        }
-                    }
-                    ControlKind::Int => {
-                        let next = self
-                            .alsa
-                            .as_ref()
-                            .and_then(|a| a.step_db(&ctrl, step_db))
-                            .or_else(|| {
-                                let cur = ctrl.opt_val()?;
-                                let step = ((ctrl.max - ctrl.min) / 64).max(1) * step_db as i64;
-                                Some((cur + step).min(ctrl.max))
-                            });
-                        if let Some(v) = next {
-                            self.write_control(ctrl.numid, v);
-                        }
-                    }
+            (Action::Toggle | Action::Confirm, ControlKind::Enum) => {
+                if !ctrl.items.is_empty()
+                    && let Some(cur) = ctrl.opt_val()
+                {
+                    self.write_control(ctrl.numid, (cur + 1) % ctrl.items.len() as i64);
                 }
             }
-            Action::Dec | Action::DecBig => {
-                if !ctrl.is_editable() {
-                    self.set_status(format!("'{}' is read-only", ctrl.name));
-                    return;
-                }
-                match ctrl.kind {
-                    ControlKind::Bool => {
-                        self.write_control(ctrl.numid, 0);
-                    }
-                    ControlKind::Enum => {
-                        if let Some(cur) = ctrl.opt_val() {
-                            self.write_control(ctrl.numid, (cur - 1).max(ctrl.min));
-                        }
-                    }
-                    ControlKind::Int => {
-                        let next = self
-                            .alsa
-                            .as_ref()
-                            .and_then(|a| a.step_db(&ctrl, -step_db))
-                            .or_else(|| {
-                                let cur = ctrl.opt_val()?;
-                                let step = ((ctrl.max - ctrl.min) / 64).max(1) * step_db as i64;
-                                Some((cur - step).max(ctrl.min))
-                            });
-                        if let Some(v) = next {
-                            self.write_control(ctrl.numid, v);
-                        }
-                    }
+            (Action::Toggle | Action::Confirm, ControlKind::Int) => {
+                // Never jump a level on Space or Enter.
+                self.set_status("- + ±1 dB · { } ±6 dB · 0 unity");
+            }
+            (Action::Inc | Action::Dec, ControlKind::Enum) => {
+                if let Some(cur) = ctrl.opt_val() {
+                    let next = if action == Action::Inc {
+                        (cur + 1).min(ctrl.max)
+                    } else {
+                        (cur - 1).max(ctrl.min)
+                    };
+                    self.write_control(ctrl.numid, next);
                 }
             }
-            Action::Unity if ctrl.kind == ControlKind::Int => {
+            (Action::Inc | Action::Dec | Action::IncBig | Action::DecBig, ControlKind::Int) => {
+                let up = matches!(action, Action::Inc | Action::IncBig);
+                let signed = if up { step_db } else { -step_db };
+                let next = self
+                    .alsa
+                    .as_ref()
+                    .and_then(|a| a.step_db(&ctrl, signed))
+                    .or_else(|| {
+                        let cur = ctrl.opt_val()?;
+                        let step = ((ctrl.max - ctrl.min) / 64).max(1) * step_db as i64;
+                        Some(if up {
+                            (cur + step).min(ctrl.max)
+                        } else {
+                            (cur - step).max(ctrl.min)
+                        })
+                    });
+                if let Some(v) = next {
+                    self.write_control(ctrl.numid, v);
+                }
+            }
+            (Action::Unity, ControlKind::Int) => {
                 if let Some(unity) = self
                     .model
                     .as_ref()
                     .and_then(|m| m.unity_raw_for(ctrl.numid))
                 {
-                    self.unity_or_arm(&ctrl, unity, item.label.clone());
+                    self.unity_or_arm(&ctrl, unity, label);
                 } else {
-                    self.set_status(format!("No 0 dB reference for {}", item.label));
-                }
-            }
-            Action::Mute if ctrl.kind == ControlKind::Int => {
-                // On an output volume row, m toggles that output's mute switch.
-                let mute = self.model.as_ref().and_then(|m| {
-                    let out = m
-                        .outputs
-                        .iter()
-                        .find(|o| o.volume_numid == Some(ctrl.numid))?;
-                    let id = out.mute_numid?;
-                    Some((id, m.controls.get(&id)?.opt_bool_val()?, out.label.clone()))
-                });
-                if let Some((id, muted, label)) = mute {
-                    if self.write_control(id, if muted { 0 } else { 1 }) {
-                        let word = if muted { "unmuted" } else { "muted" };
-                        self.set_status(format!("{label} {word}"));
-                    }
-                } else {
-                    self.write_control(ctrl.numid, ctrl.min);
+                    self.set_status(format!("No 0 dB reference for {label}"));
                 }
             }
             _ => {}
@@ -1899,124 +1902,226 @@ impl App {
 
     fn render_io(&self, f: &mut Frame, area: Rect) {
         let Some(ref m) = self.model else { return };
-        let items = self.io_items();
-        if items.is_empty() {
-            let p = Paragraph::new("No I/O or device controls exposed.").block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" I/O & Device "),
-            );
-            f.render_widget(p, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" I/O & Device ")
+            .border_style(decoration())
+            .title_style(title_style());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let rows = self.io_rows();
+        if rows.is_empty() {
+            f.render_widget(Paragraph::new(" No I/O or device controls exposed."), inner);
             return;
         }
+        let cursor = self.io_cursor.min(rows.len() - 1);
+        let width = inner.width as usize;
 
-        let cursor = self.io_cursor.min(items.len() - 1);
-        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
-        let row_start = window_start(cursor, items.len(), visible_rows);
-        let row_end = (row_start + visible_rows).min(items.len());
-
-        let rows: Vec<Row> = items[row_start..row_end]
-            .iter()
-            .enumerate()
-            .map(|(local_i, item)| {
-                let i = row_start + local_i;
-                let c = &m.controls[&item.numid];
-                let (mut val_str, val_style) = match c.kind {
-                    ControlKind::Bool => match c.opt_bool_val() {
-                        Some(true) => ("ON".into(), Style::default().fg(Color::Green)),
-                        Some(false) => ("OFF".into(), secondary()),
-                        None => ("?".into(), Style::default().fg(Color::Yellow)),
-                    },
-                    ControlKind::Enum => {
-                        let lbl = c.enum_label().to_string();
-                        let col = if !c.value_valid || c.val() > 0 {
-                            Color::Yellow
-                        } else {
-                            Color::Reset
-                        };
-                        (lbl, Style::default().fg(col))
-                    }
-                    ControlKind::Int => match c.opt_val() {
-                        Some(v) => {
-                            let frac = if c.max > c.min {
-                                ((v - c.min) as f64 / (c.max - c.min) as f64).clamp(0.0, 1.0)
-                            } else {
-                                0.0
-                            };
-                            let bars = (frac * 18.0).round() as usize;
-                            let meter = format!("{}{}", "█".repeat(bars), "░".repeat(18 - bars));
-                            let txt = c
-                                .current_db()
-                                .map(|db| format!("{meter} {db:+6.1} dB"))
-                                .unwrap_or_else(|| format!("{meter} {v}"));
-                            (txt, Style::default().fg(Color::Cyan))
-                        }
-                        None => ("?".into(), Style::default().fg(Color::Yellow)),
-                    },
-                };
-                if !c.is_editable() {
-                    val_str.push_str(" [RO]");
+        // Build every line, remembering which board row each belongs to, then
+        // show the window that keeps the cursor row in view.
+        let mut lines: Vec<(Line, Option<usize>)> = Vec::new();
+        let mut section = "";
+        for (ri, row) in rows.iter().enumerate() {
+            if row.section != section {
+                if !section.is_empty() {
+                    lines.push((Line::from(""), None));
                 }
-                let style = if i == cursor {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                let armed_here = matches!(
-                    self.armed.as_ref().map(|a| &a.action),
-                    Some(ArmedAction::Phantom { numid, .. }) if *numid == item.numid
-                );
-                let on = c.opt_bool_val() == Some(true);
-                let value_cell = if armed_here {
-                    Cell::from(Line::from(vec![
-                        Span::styled(" ARM 48V? ", badge(Color::Yellow)),
-                        Span::styled(" Space again within 3 s · Esc cancels", secondary()),
-                    ]))
-                } else if on && m.is_phantom_switch(item.numid) {
-                    Cell::from(Line::from(vec![
-                        Span::styled(" 48V ", badge(Color::Red)),
+                section = row.section;
+                let title = format!(" {section} ");
+                let rule = "─".repeat(width.saturating_sub(title.chars().count()));
+                lines.push((
+                    Line::from(vec![
                         Span::styled(
-                            " live",
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                            title,
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
                         ),
-                    ]))
-                } else if on && item.label.ends_with(" Mute") {
-                    Cell::from(Span::styled(" MUTED ", badge(Color::Red)))
-                } else {
-                    Cell::from(val_str).style(val_style)
-                };
-                Row::new(vec![
-                    Cell::from(item.section).style(secondary()),
-                    Cell::from(item.label.clone()),
-                    value_cell,
-                ])
-                .style(style)
-            })
-            .collect();
-
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(15),
-                Constraint::Length(34),
-                Constraint::Min(24),
-            ],
-        )
-        .header(
-            Row::new(["Section", "Control", "Value"]).style(
+                        Span::styled(rule, decoration()),
+                    ]),
+                    None,
+                ));
+            }
+            let selected = ri == cursor;
+            let label_style = if selected {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
                 Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" I/O & Device ")
-                .border_style(decoration())
-                .title_style(title_style()),
+            };
+            let muted = row
+                .mute_numid()
+                .and_then(|id| m.controls.get(&id))
+                .is_some_and(|c| c.opt_bool_val() == Some(true));
+            let mut spans = vec![Span::styled(
+                format!(" {:<IO_LABEL_W$} ", truncate(&row.label, IO_LABEL_W)),
+                label_style,
+            )];
+            let mut used = IO_LABEL_W + 2;
+            for (ci, cell) in row.cells.iter().enumerate() {
+                let Some(c) = m.controls.get(&cell.numid) else {
+                    continue;
+                };
+                let on_cursor = selected && ci == self.io_col.min(row.cells.len() - 1);
+                let cell_spans = self.io_cell_spans(m, cell, c, muted, on_cursor);
+                let w: usize = cell_spans.iter().map(|s| s.content.chars().count()).sum();
+                // Wrap to a continuation line under the label when a row has
+                // more controls than the width holds (Gen 4 inputs).
+                if used + w > width && used > IO_LABEL_W + 2 {
+                    lines.push((Line::from(std::mem::take(&mut spans)), Some(ri)));
+                    spans.push(Span::raw(" ".repeat(IO_LABEL_W + 2)));
+                    used = IO_LABEL_W + 2;
+                }
+                spans.extend(cell_spans);
+                spans.push(Span::raw("   "));
+                used += w + 3;
+            }
+            lines.push((Line::from(spans), Some(ri)));
+        }
+
+        let inner_h = inner.height as usize;
+        let total = lines.len();
+        let shown: Vec<Line> = if total <= inner_h || inner_h < 2 {
+            lines.into_iter().map(|(l, _)| l).collect()
+        } else {
+            // Keep the cursor row's last line in view; the window leaves one
+            // line for the "more" count.
+            let cursor_line = lines
+                .iter()
+                .rposition(|(_, r)| *r == Some(cursor))
+                .unwrap_or(0);
+            let visible = inner_h - 1;
+            let start = window_start(cursor_line, total, visible);
+            let end = (start + visible).min(total);
+            let last_shown = lines[..end].iter().rev().find_map(|(_, r)| *r);
+            let hidden = rows.len() - 1 - last_shown.unwrap_or(0);
+            let mut out: Vec<Line> = lines
+                .into_iter()
+                .skip(start)
+                .take(visible)
+                .map(|(l, _)| l)
+                .collect();
+            if hidden > 0 {
+                out.push(Line::from(Span::styled(
+                    format!(" ↓ {hidden} more"),
+                    secondary(),
+                )));
+            }
+            out
+        };
+        f.render_widget(Paragraph::new(shown), inner);
+    }
+
+    /// One control on the I/O board. The cell under the cursor is drawn
+    /// reversed and bold in plain text, so the cursor shows even on a badge;
+    /// its state is still carried by the glyph and the word.
+    fn io_cell_spans(
+        &self,
+        m: &ScarlettModel,
+        cell: &IoCell,
+        c: &AlsaControl,
+        row_muted: bool,
+        on_cursor: bool,
+    ) -> Vec<Span<'static>> {
+        let green = Style::default().fg(Color::Green);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let caution = Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+        let armed_here = matches!(
+            self.armed.as_ref().map(|a| &a.action),
+            Some(ArmedAction::Phantom { numid, .. }) if *numid == cell.numid
         );
-        f.render_widget(table, area);
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        // An output's volume and mute need no name: the bar and the word say it.
+        if !cell.name.is_empty() && !matches!(cell.name, "Volume" | "Mute") {
+            spans.push(Span::styled(format!("{} ", cell.name), secondary()));
+        }
+        match c.kind {
+            ControlKind::Int => match c.opt_val() {
+                Some(v) => {
+                    let frac = if c.max > c.min {
+                        ((v - c.min) as f64 / (c.max - c.min) as f64).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let fill = (frac * IO_BAR_W as f64).round() as usize;
+                    // A muted output greys its bar (docs/DESIGN.md "States").
+                    let fill_style = if row_muted {
+                        decoration()
+                    } else {
+                        Style::default().fg(Color::Cyan)
+                    };
+                    spans.push(Span::styled("█".repeat(fill), fill_style));
+                    spans.push(Span::styled("░".repeat(IO_BAR_W - fill), decoration()));
+                    let txt = c
+                        .current_db()
+                        .map(|db| format!(" {db:+6.1} dB"))
+                        .unwrap_or_else(|| format!(" {v:>6}   "));
+                    spans.push(Span::styled(
+                        txt,
+                        if row_muted { secondary() } else { bold },
+                    ));
+                }
+                None => spans.push(Span::styled("?", caution)),
+            },
+            ControlKind::Enum => {
+                let cur = c.opt_val().filter(|_| c.value_valid);
+                if cur.is_none() {
+                    spans.push(Span::styled("?", caution));
+                } else if c.items.len() <= 3 {
+                    // Few choices: show them all, the current one marked ●.
+                    for (i, item) in c.items.iter().enumerate() {
+                        if i > 0 {
+                            spans.push(Span::raw("  "));
+                        }
+                        if cur == Some(i as i64) {
+                            spans.push(Span::styled(format!("● {item}"), bold));
+                        } else {
+                            spans.push(Span::styled(format!("○ {item}"), secondary()));
+                        }
+                    }
+                } else {
+                    spans.push(Span::styled(format!("● {}", c.enum_label()), bold));
+                }
+            }
+            ControlKind::Bool => match c.opt_bool_val() {
+                _ if armed_here => {
+                    spans.push(Span::styled(" ARM 48V? ", badge(Color::Yellow)));
+                    spans.push(Span::styled(
+                        " Space again within 3 s · Esc cancels",
+                        secondary(),
+                    ));
+                }
+                Some(true) if m.is_phantom_switch(cell.numid) => {
+                    spans.push(Span::styled(" 48V ", badge(Color::Red)));
+                    spans.push(Span::styled(
+                        " live",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                Some(true) if cell.name == "Mute" => {
+                    spans.push(Span::styled(" MUTED ", badge(Color::Red)));
+                }
+                Some(false) if cell.name == "Mute" => {
+                    spans.push(Span::styled("□ mute", secondary()));
+                }
+                Some(true) => spans.push(Span::styled("■ on", green)),
+                Some(false) => spans.push(Span::styled("□ off", secondary())),
+                None => spans.push(Span::styled("?", caution)),
+            },
+        }
+        if !c.is_editable() {
+            spans.push(Span::styled(" ⊘", secondary()));
+        }
+        if on_cursor && !armed_here {
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            return vec![Span::styled(
+                text,
+                Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            )];
+        }
+        spans
     }
 
     fn render_routing(&self, f: &mut Frame, area: Rect) {
@@ -2481,9 +2586,23 @@ impl App {
         match self.tab {
             Tab::Overview => String::new(),
             Tab::IoDevice => self
-                .io_items()
+                .io_rows()
                 .get(self.io_cursor)
-                .map(|i| i.label.clone())
+                .map(|row| {
+                    let cell = row.cells.get(self.io_col.min(row.cells.len() - 1));
+                    let name = cell.map_or("", |c| c.name);
+                    let read_only = cell
+                        .and_then(|c| m.controls.get(&c.numid))
+                        .is_some_and(|c| !c.is_editable());
+                    let mut s = row.label.clone();
+                    if !name.is_empty() {
+                        s.push_str(&format!(" · {name}"));
+                    }
+                    if read_only {
+                        s.push_str(" · ⊘ read-only");
+                    }
+                    s
+                })
                 .unwrap_or_default(),
             Tab::Routing => m
                 .routes
@@ -2692,6 +2811,10 @@ fn hint_line(hints: &[(&str, &str)], with_help: bool, width: usize) -> Line<'sta
     }
     Line::from(spans)
 }
+
+/// I/O board: width of the row label column and of a level bar.
+const IO_LABEL_W: usize = 22;
+const IO_BAR_W: usize = 20;
 
 /// How long the peak-hold tick holds before it falls (docs/DESIGN.md).
 const PEAK_HOLD: Duration = Duration::from_millis(1500);
@@ -3021,9 +3144,9 @@ mod tests {
         let mut app = App::for_test(Some(model_4i4()));
         app.tab = Tab::IoDevice;
         app.io_cursor = app
-            .io_items()
+            .io_rows()
             .iter()
-            .position(|i| i.section == "Phantom Power")
+            .position(|r| r.section == SEC_PHANTOM)
             .expect("fixture has a phantom row");
         app
     }
@@ -3046,9 +3169,19 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(app.armed.is_none());
 
-        // Moving away cancels too.
-        press(&mut app, KeyCode::Char('l'));
-        assert!(app.armed.is_some(), "l arms like Space");
+        // Only Space arms: not +, not l, not Enter (docs/DESIGN.md "48V keys").
+        for code in [KeyCode::Char('+'), KeyCode::Char('l'), KeyCode::Enter] {
+            press(&mut app, code);
+            assert!(app.armed.is_none(), "{code:?} must not arm 48V");
+        }
+        assert!(
+            app.status_msg.contains("Space"),
+            "Enter says which key to use"
+        );
+
+        // Moving away cancels an arm.
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_some());
         press(&mut app, KeyCode::Char('k'));
         assert!(app.armed.is_none());
 
@@ -3062,7 +3195,7 @@ mod tests {
     #[test]
     fn phantom_arm_times_out_after_three_seconds() {
         let mut app = io_app_on_phantom();
-        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char(' '));
         app.expire_armed(Instant::now() + Duration::from_millis(2500));
         assert!(app.armed.is_some(), "still armed inside 3 s");
         app.expire_armed(Instant::now() + Duration::from_secs(3));
@@ -3209,17 +3342,174 @@ mod tests {
     }
 
     #[test]
-    fn io_shift_l_steps_six_db_through_the_keymap() {
+    fn io_brace_steps_six_db_through_the_keymap() {
         assert_eq!(
-            keys::lookup(Scope::Io, KeyCode::Char('L')),
+            keys::lookup(Scope::Io, KeyCode::Char('}')),
             Some(Action::IncBig)
         );
         let mut app = App::for_test(Some(model_4i4()));
         app.tab = Tab::IoDevice;
         // Without ALSA the write fails, but the key must reach the I/O handler
         // and not be swallowed as a global key.
-        press(&mut app, KeyCode::Char('L'));
+        press(&mut app, KeyCode::Char('}'));
         assert_eq!(app.tab, Tab::IoDevice);
+    }
+
+    fn io_app() -> App {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::IoDevice;
+        app
+    }
+
+    /// docs/DESIGN.md "Layout: I/O": a board with one row per channel.
+    #[test]
+    fn io_board_puts_a_channels_controls_on_one_row() {
+        let app = io_app();
+        let buf = render_to_buffer(&app, 95, 30);
+        let screen = screen_text(&buf);
+        let lines: Vec<&str> = screen.lines().collect();
+        let y = lines
+            .iter()
+            .position(|l| l.contains("Gain"))
+            .expect("input row");
+        let input = lines[y];
+        assert!(
+            input.contains("Input 1") && input.contains("● Line"),
+            "{input:?}"
+        );
+        // What does not fit wraps to a continuation line under the label.
+        let wrapped = format!("{input}{}", lines[y + 1]);
+        assert!(
+            wrapped.contains("Air") && !lines[y + 1].contains("Input"),
+            "{wrapped:?}"
+        );
+        let output = screen
+            .lines()
+            .find(|l| l.contains("Monitor L"))
+            .expect("output row");
+        assert!(
+            output.contains(" dB") && output.contains("□ mute"),
+            "{output:?}"
+        );
+        // Sections in order, 48V on its own; the flat table is gone.
+        let at = |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle}"));
+        assert!(at(" Inputs ") < at(" Phantom power ") && at(" Phantom power ") < at(" Outputs "));
+        assert!(!screen.contains("Section") && !screen.contains("Control"));
+        // Each channel is one board row: fewer rows than controls.
+        let rows = app.io_rows();
+        let controls: usize = rows.iter().map(|r| r.cells.len()).sum();
+        assert!(
+            rows.len() < controls,
+            "{} rows, {controls} controls",
+            rows.len()
+        );
+    }
+
+    #[test]
+    fn io_h_and_l_move_between_controls_and_never_write() {
+        let mut app = io_app();
+        let cells = app.io_rows()[0].cells.len();
+        assert!(cells > 1, "fixture's first input has several controls");
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!((app.io_cursor, app.io_col), (0, 1));
+        for _ in 0..10 {
+            press(&mut app, KeyCode::Right);
+        }
+        assert_eq!(app.io_col, cells - 1, "stops at the row's last control");
+        // Moving to a shorter row clamps the column.
+        let phantom = app
+            .io_rows()
+            .iter()
+            .position(|r| r.section == SEC_PHANTOM)
+            .unwrap();
+        for _ in 0..phantom {
+            press(&mut app, KeyCode::Char('j'));
+        }
+        assert_eq!((app.io_cursor, app.io_col), (phantom, 0));
+        press(&mut app, KeyCode::Char('h'));
+        assert!(
+            app.armed.is_none() && app.status_msg.is_empty(),
+            "move keys do nothing but move"
+        );
+    }
+
+    #[test]
+    fn io_cursor_reverses_one_control_and_names_it_in_the_footer() {
+        let mut app = io_app();
+        press(&mut app, KeyCode::Char('l')); // Input 1 · Level
+        let buf = render_to_buffer(&app, 95, 30);
+        let y = (0..30)
+            .find(|&y| row_text(&buf, y).contains("Gain"))
+            .unwrap();
+        let row = row_text(&buf, y);
+        let col = |needle: &str| row[..row.find(needle).unwrap()].chars().count() as u16;
+        let reversed = |x: u16| buf[(x, y)].modifier.contains(Modifier::REVERSED);
+        assert!(reversed(col("● Line")), "the Level control has the cursor");
+        assert!(!reversed(col("Gain")), "the Gain control does not");
+        assert!(!reversed(1), "the row label is not reversed");
+        let context = row_text(&buf, 28);
+        assert!(context.contains("· Level"), "{context:?}");
+    }
+
+    #[test]
+    fn io_m_is_an_output_mute_only() {
+        let app = io_app();
+        let rows = app.io_rows();
+        let input = rows.iter().find(|r| r.section == SEC_INPUTS).unwrap();
+        let output = rows.iter().find(|r| r.section == SEC_OUTPUTS).unwrap();
+        assert_eq!(input.mute_numid(), None, "m does nothing on an input");
+        assert_eq!(output.mute_numid(), Some(7));
+        // A muted output shows the badge on its volume row.
+        let mut app = io_app();
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&7)
+            .unwrap()
+            .values = vec![1];
+        let screen = screen_text(&render_to_buffer(&app, 95, 30));
+        let row = screen.lines().find(|l| l.contains("Monitor L")).unwrap();
+        assert!(row.contains(" MUTED "), "{row:?}");
+    }
+
+    #[test]
+    fn io_read_only_controls_show_the_glyph_not_ro() {
+        let mut app = io_app();
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&14)
+            .unwrap()
+            .rw = false;
+        press(&mut app, KeyCode::Char('l'));
+        let buf = render_to_buffer(&app, 95, 30);
+        let screen = screen_text(&buf);
+        assert!(screen.contains("⊘") && !screen.contains("[RO]"), "{screen}");
+        assert!(row_text(&buf, 28).contains("read-only"));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.status_msg.contains("read-only"));
+    }
+
+    #[test]
+    fn io_board_scrolls_and_counts_hidden_rows() {
+        let mut model = model_4i4();
+        let template = model.outputs[0].clone();
+        for i in 0..40 {
+            let mut out = template.clone();
+            out.label = format!("Extra {i:02}");
+            model.outputs.push(out);
+        }
+        let mut app = App::for_test(Some(model));
+        app.tab = Tab::IoDevice;
+        let top = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(top.contains("↓ ") && top.contains(" more"), "{top}");
+        let last = app.io_rows().len() - 1;
+        app.io_cursor = last;
+        let bottom = screen_text(&render_to_buffer(&app, 95, 30));
+        let label = app.io_rows()[last].label.clone();
+        assert!(bottom.contains(&truncate(&label, IO_LABEL_W)), "{bottom}");
     }
 
     #[test]
