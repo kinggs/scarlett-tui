@@ -667,40 +667,7 @@ pub fn meter_to_dbfs(raw: i64) -> f64 {
 mod tests {
     use super::*;
 
-    fn mk_ctrl(numid: u32, name: &str, kind: ControlKind, items: &[&str], val: i64) -> AlsaControl {
-        AlsaControl {
-            numid,
-            name: name.into(),
-            iface: "MIXER".into(),
-            kind,
-            count: 1,
-            min: 0,
-            max: match kind {
-                ControlKind::Bool => 1,
-                ControlKind::Enum => items.len().saturating_sub(1) as i64,
-                ControlKind::Int => 184,
-            },
-            db_min: if kind == ControlKind::Int {
-                Some(-80.0)
-            } else {
-                None
-            },
-            db_max: if kind == ControlKind::Int {
-                Some(12.0)
-            } else {
-                None
-            },
-            current_db_tlv: None,
-            unity_raw: None,
-            tlv_readable: false,
-            items: items.iter().map(|s| s.to_string()).collect(),
-            values: vec![val],
-            readable: true,
-            value_valid: true,
-            metadata_complete: true,
-            rw: true,
-        }
-    }
+    use super::fixtures::mk_ctrl;
 
     #[test]
     fn builds_4i4_gen3_model_dynamically() {
@@ -1026,5 +993,139 @@ mod tests {
         assert_eq!(focusrite_generation("1235:8203"), "Gen 2");
         assert_eq!(focusrite_generation("1235:8217"), "Vocaster");
         assert_eq!(focusrite_generation("1235:820a"), "Clarett+");
+    }
+}
+
+/// Synthetic controls shared by unit tests in this crate (no hardware needed).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) fn mk_ctrl(
+        numid: u32,
+        name: &str,
+        kind: ControlKind,
+        items: &[&str],
+        val: i64,
+    ) -> AlsaControl {
+        AlsaControl {
+            numid,
+            name: name.into(),
+            iface: "MIXER".into(),
+            kind,
+            count: 1,
+            min: 0,
+            max: match kind {
+                ControlKind::Bool => 1,
+                ControlKind::Enum => items.len().saturating_sub(1) as i64,
+                ControlKind::Int => 184,
+            },
+            db_min: if kind == ControlKind::Int {
+                Some(-80.0)
+            } else {
+                None
+            },
+            db_max: if kind == ControlKind::Int {
+                Some(12.0)
+            } else {
+                None
+            },
+            current_db_tlv: None,
+            unity_raw: None,
+            tlv_readable: false,
+            items: items.iter().map(|s| s.to_string()).collect(),
+            values: vec![val],
+            readable: true,
+            value_valid: true,
+            metadata_complete: true,
+            rw: true,
+        }
+    }
+
+    /// A Scarlett 4i4 Gen 3 shaped model: one input with Inst/Air, 48V off,
+    /// one output with volume and mute, routing, a one-cell matrix, sync and
+    /// a two-slot level meter.
+    pub(crate) fn model_4i4() -> ScarlettModel {
+        let card = CardEntry {
+            index: 1,
+            alsa_id: "USB".into(),
+            name: "Scarlett 4i4 USB".into(),
+            usb_id: "1235:8212".into(),
+            generation: "Gen 3".into(),
+        };
+        let items = &["Off", "Analogue 1", "Analogue 2", "Mix A", "PCM 1", "PCM 2"];
+        let mut meter = mk_ctrl(90, "Level Meter", ControlKind::Int, &[], 0);
+        meter.count = 2;
+        meter.max = 4095;
+        meter.values = vec![0, 0];
+        meter.rw = false;
+        let list = vec![
+            mk_ctrl(
+                1,
+                "Line In 1 Gain Capture Volume",
+                ControlKind::Int,
+                &[],
+                40,
+            ),
+            mk_ctrl(
+                6,
+                "Line 01 (Monitor L) Playback Volume",
+                ControlKind::Int,
+                &[],
+                127,
+            ),
+            mk_ctrl(7, "Line 01 Mute Playback Switch", ControlKind::Bool, &[], 0),
+            mk_ctrl(
+                14,
+                "Line In 1 Level Capture Enum",
+                ControlKind::Enum,
+                &["Line", "Inst"],
+                0,
+            ),
+            mk_ctrl(
+                18,
+                "Line In 1 Air Capture Switch",
+                ControlKind::Bool,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                20,
+                "Line In 1-2 Phantom Power Capture Switch",
+                ControlKind::Bool,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                22,
+                "Analogue Output 01 Playback Enum",
+                ControlKind::Enum,
+                items,
+                0,
+            ),
+            mk_ctrl(
+                26,
+                "Mixer Input 01 Capture Enum",
+                ControlKind::Enum,
+                items,
+                4,
+            ),
+            mk_ctrl(
+                40,
+                "Mix A Input 01 Playback Volume",
+                ControlKind::Int,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                89,
+                "Sync Status",
+                ControlKind::Enum,
+                &["Unlocked", "Locked"],
+                1,
+            ),
+            meter,
+        ];
+        ScarlettModel::build(card, StreamRateInfo::default(), list)
     }
 }

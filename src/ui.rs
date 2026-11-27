@@ -148,6 +148,38 @@ impl App {
         app
     }
 
+    /// An app with no ALSA handle, no card scan and no `pw-link` call, for render tests.
+    #[cfg(test)]
+    fn for_test(model: Option<ScarlettModel>) -> Self {
+        let n = model.as_ref().map_or(0, |m| m.meter_channels.len());
+        Self {
+            cards: Vec::new(),
+            card_override: None,
+            current_card_index: model.as_ref().map(|m| m.card.index),
+            generation: 1,
+            alsa: None,
+            model,
+            tab: Tab::Overview,
+            meter_raw: vec![0; n],
+            meter_peak: vec![-96.0; n],
+            meter_peak_time: vec![Instant::now(); n],
+            io_cursor: 0,
+            route_cursor: 0,
+            route_picker: None,
+            matrix_row: 0,
+            matrix_col: 0,
+            matrix_prev_levels: HashMap::new(),
+            pw_links: Vec::new(),
+            pw_show_all: false,
+            pw_cursor: 0,
+            status_msg: String::new(),
+            status_at: Instant::now(),
+            last_rate_check: Instant::now(),
+            last_poll_fallback: Instant::now(),
+            should_quit: false,
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_msg = msg.into();
         self.status_at = Instant::now();
@@ -1078,11 +1110,8 @@ impl App {
                     format!("({})  ", m.card.generation),
                     Style::default().fg(Color::Cyan),
                 ),
-                Span::styled(
-                    format!("USB {}  ", m.card.usb_id),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(format!("{fw}  "), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("USB {}  ", m.card.usb_id), secondary()),
+                Span::styled(format!("{fw}  "), secondary()),
                 Span::styled(
                     format!("● {sync_label}  "),
                     Style::default().fg(sync_color).add_modifier(Modifier::BOLD),
@@ -1090,11 +1119,11 @@ impl App {
                 Span::styled(format!("{rate_str}  "), Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!("PW links: {pw_count}"),
-                    Style::default().fg(if pw_count > 0 {
-                        Color::Yellow
+                    if pw_count > 0 {
+                        Style::default().fg(Color::Yellow)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ),
             ])
         } else if let Some(req) = self.card_override {
@@ -1113,7 +1142,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" scarlett-tui ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(header, area);
     }
@@ -1122,7 +1152,7 @@ impl App {
         let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
         let tabs = Tabs::new(titles)
             .select(self.tab as usize)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(secondary())
             .highlight_style(
                 Style::default()
                     .fg(Color::Cyan)
@@ -1223,16 +1253,16 @@ impl App {
             meter_lines.push(Line::from(vec![
                 Span::raw(format!(" {label:<22} ")),
                 Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+                Span::styled("░".repeat(empty), decoration()),
                 Span::raw(format!(" {db_text}")),
-                Span::styled(peak_tag, Style::default().fg(Color::DarkGray)),
+                Span::styled(peak_tag, secondary()),
             ]));
         }
 
         if meter_lines.is_empty() {
             meter_lines.push(Line::from(Span::styled(
                 " No hardware level meter exposed by this model.",
-                Style::default().fg(Color::DarkGray),
+                secondary(),
             )));
         }
 
@@ -1240,7 +1270,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Live Hardware Meters (ALSA) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(meter_panel, cols[0]);
 
@@ -1260,11 +1291,11 @@ impl App {
                 let lbl = c.enum_label();
                 badges.push(Span::styled(
                     format!("[{lbl}]"),
-                    Style::default().fg(if lbl == "Inst" {
-                        Color::Yellow
+                    if lbl == "Inst" {
+                        Style::default().fg(Color::Yellow)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.air_numid
@@ -1279,7 +1310,11 @@ impl App {
                 badges.push(Span::raw(" "));
                 badges.push(Span::styled(
                     txt,
-                    Style::default().fg(if on { Color::Yellow } else { Color::DarkGray }),
+                    if on {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.pad_numid
@@ -1288,11 +1323,11 @@ impl App {
                 badges.push(Span::raw(" "));
                 badges.push(Span::styled(
                     "[Pad]",
-                    Style::default().fg(if c.bool_val() {
-                        Color::Cyan
+                    if c.bool_val() {
+                        Style::default().fg(Color::Cyan)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.gain_numid
@@ -1320,7 +1355,7 @@ impl App {
                         "ON",
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
-                    Some(false) => ("OFF", Style::default().fg(Color::DarkGray)),
+                    Some(false) => ("OFF", secondary()),
                     None => ("?", Style::default().fg(Color::Yellow)),
                 };
                 info_lines.push(Line::from(vec![
@@ -1366,7 +1401,7 @@ impl App {
             info_lines.push(Line::from(vec![
                 Span::raw(format!("  {:<21} ", truncate(&r.label, 21))),
                 Span::styled(r.summary.clone(), Style::default().fg(Color::Green)),
-                Span::styled(out_extra, Style::default().fg(Color::DarkGray)),
+                Span::styled(out_extra, secondary()),
             ]));
         }
 
@@ -1398,7 +1433,7 @@ impl App {
                         pipewire::short_port(&l.output_port),
                         pipewire::short_port(&l.input_port)
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary(),
                 )));
             }
         }
@@ -1407,7 +1442,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Status & Signal Path ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(info_panel, cols[1]);
     }
@@ -1436,18 +1472,20 @@ impl App {
             .map(|(local_i, item)| {
                 let i = row_start + local_i;
                 let c = &m.controls[&item.numid];
-                let (mut val_str, val_color) = match c.kind {
+                let (mut val_str, val_style) = match c.kind {
                     ControlKind::Bool => match c.opt_bool_val() {
                         Some(true) => (
                             "ON".into(),
-                            if item.label.contains("Phantom") || item.label.contains("Mute") {
-                                Color::Red
-                            } else {
-                                Color::Green
-                            },
+                            Style::default().fg(
+                                if item.label.contains("Phantom") || item.label.contains("Mute") {
+                                    Color::Red
+                                } else {
+                                    Color::Green
+                                },
+                            ),
                         ),
-                        Some(false) => ("OFF".into(), Color::DarkGray),
-                        None => ("?".into(), Color::Yellow),
+                        Some(false) => ("OFF".into(), secondary()),
+                        None => ("?".into(), Style::default().fg(Color::Yellow)),
                     },
                     ControlKind::Enum => {
                         let lbl = c.enum_label().to_string();
@@ -1456,7 +1494,7 @@ impl App {
                         } else {
                             Color::Reset
                         };
-                        (lbl, col)
+                        (lbl, Style::default().fg(col))
                     }
                     ControlKind::Int => match c.opt_val() {
                         Some(v) => {
@@ -1471,9 +1509,9 @@ impl App {
                                 .current_db()
                                 .map(|db| format!("{meter} {db:+6.1} dB"))
                                 .unwrap_or_else(|| format!("{meter} {v}"));
-                            (txt, Color::Cyan)
+                            (txt, Style::default().fg(Color::Cyan))
                         }
-                        None => ("?".into(), Color::Yellow),
+                        None => ("?".into(), Style::default().fg(Color::Yellow)),
                     },
                 };
                 if !c.is_editable() {
@@ -1485,9 +1523,9 @@ impl App {
                     Style::default()
                 };
                 Row::new(vec![
-                    Cell::from(item.section).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(item.section).style(secondary()),
                     Cell::from(item.label.clone()),
-                    Cell::from(val_str).style(Style::default().fg(val_color)),
+                    Cell::from(val_str).style(val_style),
                 ])
                 .style(style)
             })
@@ -1509,7 +1547,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Inputs, Outputs & Device Switches (Space toggle · h/l adjust · 0 unity · m min) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1539,20 +1578,19 @@ impl App {
                 } else {
                     Style::default()
                 };
-                let src_color = if r.current == "Off" {
-                    Color::DarkGray
+                let src_style = if r.current == "Off" {
+                    secondary()
                 } else if r.current.starts_with("Mix ") {
-                    Color::Yellow
+                    Style::default().fg(Color::Yellow)
                 } else if r.current.starts_with("PCM ") {
-                    Color::Green
+                    Style::default().fg(Color::Green)
                 } else {
-                    Color::Cyan
+                    Style::default().fg(Color::Cyan)
                 };
                 Row::new(vec![
-                    Cell::from(r.group.title()).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(r.group.title()).style(secondary()),
                     Cell::from(r.label.clone()),
-                    Cell::from(r.current.clone())
-                        .style(Style::default().fg(src_color).add_modifier(Modifier::BOLD)),
+                    Cell::from(r.current.clone()).style(src_style.add_modifier(Modifier::BOLD)),
                     Cell::from(r.summary.clone()),
                 ])
                 .style(style)
@@ -1579,7 +1617,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Hardware Routing Matrix (Enter pick source · h/l cycle · x Off) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1637,14 +1676,11 @@ impl App {
                 let r_idx = row_start + local_r;
                 let src = m.mixer_input_source(in_idx);
                 let row_label = format!("In {in_idx:02} [{src}]");
-                let mut cells =
-                    vec![
-                        Cell::from(row_label).style(Style::default().fg(if src == "Off" {
-                            Color::DarkGray
-                        } else {
-                            Color::Reset
-                        })),
-                    ];
+                let mut cells = vec![Cell::from(row_label).style(if src == "Off" {
+                    secondary()
+                } else {
+                    Style::default()
+                })];
 
                 for (local_c, &mix) in shown_mixes.iter().enumerate() {
                     let c_idx = col_start + local_c;
@@ -1654,9 +1690,7 @@ impl App {
                     {
                         match c.opt_val() {
                             None => ("  ?   ".into(), Style::default().fg(Color::Yellow)),
-                            Some(v) if v <= c.min => {
-                                ("  -∞  ".into(), Style::default().fg(Color::DarkGray))
-                            }
+                            Some(v) if v <= c.min => ("  -∞  ".into(), secondary()),
                             Some(v) => {
                                 if let Some(db) = c.current_db() {
                                     let col = if db > 0.25 {
@@ -1673,7 +1707,7 @@ impl App {
                             }
                         }
                     } else {
-                        ("  —   ".into(), Style::default().fg(Color::DarkGray))
+                        ("  —   ".into(), secondary())
                     };
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1695,7 +1729,8 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Mix Matrix (dB · * = routed to output · +/- ±1dB · {/} ±6dB · 0 unity · m/Space mute) ")
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(decoration())
+                .title_style(title_style()),
             );
         f.render_widget(table, area);
     }
@@ -1715,7 +1750,8 @@ impl App {
                         Block::default()
                             .borders(Borders::ALL)
                             .title(title)
-                            .border_style(Style::default().fg(Color::DarkGray)),
+                            .border_style(decoration())
+                            .title_style(title_style()),
                     );
             f.render_widget(p, area);
             return;
@@ -1747,14 +1783,14 @@ impl App {
                     "other"
                 };
                 Row::new(vec![
-                    Cell::from(format!("#{}", l.id)).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(format!("#{}", l.id)).style(secondary()),
                     Cell::from(tag).style(Style::default().fg(if is_loopback {
                         Color::Yellow
                     } else {
                         Color::Cyan
                     })),
                     Cell::from(pipewire::short_port(&l.output_port)),
-                    Cell::from("→").style(Style::default().fg(Color::DarkGray)),
+                    Cell::from("→").style(secondary()),
                     Cell::from(pipewire::short_port(&l.input_port)),
                 ])
                 .style(style)
@@ -1782,7 +1818,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1833,11 +1870,29 @@ impl App {
                     format!(
                         " 1-5 / Tab switch view · hjkl/arrows navigate · r refresh{multi} · q quit "
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary(),
                 )
             };
         f.render_widget(Paragraph::new(Line::from(msg)), area);
     }
+}
+
+/// Secondary text: default foreground, dimmed. Never DarkGray, which Omarchy
+/// maps to the theme's `muted` at 1.9:1 contrast (docs/DESIGN.md rule 1).
+fn secondary() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
+/// Decoration only: borders, the empty meter track and `·` (docs/DESIGN.md rule 2).
+/// Never use this for words a user must read.
+fn decoration() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// Block titles are readable text: default foreground, so they do not inherit
+/// the DarkGray border colour.
+fn title_style() -> Style {
+    Style::default().fg(Color::Reset)
 }
 
 fn window_start(cursor: usize, total: usize, visible: usize) -> usize {
@@ -1894,6 +1949,60 @@ pub fn run_tui(card_override: Option<u32>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::model::fixtures::model_4i4;
+    use ratatui::{backend::TestBackend, buffer::Buffer};
+
+    /// Render one frame of `app` into a `w`×`h` buffer.
+    pub(super) fn render_to_buffer(app: &App, w: u16, h: u16) -> Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("test backend");
+        term.draw(|f| app.render(f)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
+    /// Glyphs DarkGray may draw: box-drawing borders, the empty meter track and `·`.
+    fn is_decoration(sym: &str) -> bool {
+        sym.chars()
+            .all(|c| c == ' ' || c == '░' || c == '·' || ('\u{2500}'..='\u{257F}').contains(&c))
+    }
+
+    #[test]
+    fn darkgray_never_draws_readable_text() {
+        let sizes = [(95, 30), (160, 36), (80, 24)];
+        for model in [Some(model_4i4()), None] {
+            let mut app = App::for_test(model);
+            app.status_msg.clear();
+            for tab in Tab::ALL {
+                app.tab = tab;
+                for (w, h) in sizes {
+                    let buf = render_to_buffer(&app, w, h);
+                    for cell in buf.content() {
+                        if cell.fg == Color::DarkGray {
+                            assert!(
+                                is_decoration(cell.symbol()),
+                                "DarkGray text {:?} on tab {} at {w}x{h}",
+                                cell.symbol(),
+                                tab.title()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn footer_hints_are_dim_default_foreground() {
+        let app = App::for_test(Some(model_4i4()));
+        let buf = render_to_buffer(&app, 95, 30);
+        let y = 28;
+        let row: String = (0..95).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        assert!(row.contains("q quit"), "footer row was {row:?}");
+        let x = row.find('q').unwrap() as u16;
+        let cell = &buf[(x, y)];
+        assert_eq!(cell.fg, Color::Reset);
+        assert!(cell.modifier.contains(Modifier::DIM));
+    }
 
     #[test]
     fn window_start_never_exceeds_bounds_after_shrink() {
