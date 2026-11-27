@@ -30,6 +30,8 @@ Panel {
   property var meterLabels: []
   property var meterDbfs: []
   property int expandedOutput: -1
+  // numid of the 48V switch waiting for its confirming click, or -1.
+  property int armedPhantom: -1
 
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property color barFg: bar ? bar.barForeground : Commons.Color.foreground
@@ -101,6 +103,23 @@ Panel {
       var cur = (t.value === null || t.value === undefined) ? 0 : Number(t.value)
       var next = (cur + 1) % t.items.length
       setControl(t.numid, next)
+    }
+  }
+
+  // 48V takes two clicks to enable (arm, then confirm within 3 s) and one to
+  // disable. Kenny's ruling, docs/DESIGN.md "Rulings".
+  function clickPhantom(t) {
+    if (!t || !t.rw) return
+    if (t.active) {
+      armedPhantom = -1
+      setControl(t.numid, 0)
+    } else if (armedPhantom === t.numid) {
+      armedPhantom = -1
+      phantomArmTimer.stop()
+      setControl(t.numid, 1)
+    } else {
+      armedPhantom = t.numid
+      phantomArmTimer.restart()
     }
   }
 
@@ -181,6 +200,7 @@ Panel {
 
   onOpenedChanged: {
     expandedOutput = -1
+    armedPhantom = -1
     if (opened) {
       send("refresh")
       send("meters on")
@@ -222,6 +242,12 @@ Panel {
   }
 
   Timer {
+    id: phantomArmTimer
+    interval: 3000
+    onTriggered: root.armedPhantom = -1
+  }
+
+  Timer {
     id: errorTimer
     interval: 4000
     onTriggered: root.lastError = ""
@@ -239,12 +265,26 @@ Panel {
     tooltipText: !root.daemonOnline
       ? "Scarlett backend unavailable (restarting)"
       : root.connected
-        ? root.titleText + " · " + root.subtitleText + " (right-click: open TUI)"
+        ? root.titleText + (root.anyPhantomOn ? " · 48V LIVE" : "") + " · " + root.subtitleText
+          + " (right-click: open TUI · scroll: no action)"
         : "Scarlett not connected"
     onPressed: function(b) {
       if (b === Qt.RightButton || b === Qt.MiddleButton) root.openTui()
       else root.toggle()
     }
+  }
+
+  // 48V live: a small urgent dot on the bar icon (docs/DESIGN.md "48V live").
+  Rectangle {
+    visible: root.connected && root.mixerAvailable && root.anyPhantomOn
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    color: Commons.Color.urgent
+    anchors.top: button.top
+    anchors.right: button.right
+    anchors.topMargin: Style.space(3)
+    anchors.rightMargin: Style.space(3)
   }
 
   KeyboardPanel {
@@ -499,23 +539,51 @@ Panel {
               model: root.phantom
 
               Item {
+                id: phRow
                 required property var modelData
+                // "Remember 48V" is a persistence setting, not phantom power itself.
+                readonly property bool isSwitch: String(modelData.label || "").indexOf("Remember") < 0
+                readonly property bool live: isSwitch && !!modelData.active
+                readonly property bool armed: isSwitch && root.armedPhantom === modelData.numid
                 width: panelColumn.width
-                implicitHeight: Math.max(phLabel.implicitHeight, phSwitch.implicitHeight)
+                implicitHeight: Math.max(phLabel.implicitHeight, phSwitch.implicitHeight, phButton.implicitHeight)
 
                 Text {
                   id: phLabel
                   textFormat: Text.PlainText
                   text: String(modelData.label || "")
-                  color: root.fg
+                  color: phRow.live ? Commons.Color.urgent : root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
+                  font.bold: phRow.live
                   anchors.left: parent.left
                   anchors.verticalCenter: parent.verticalCenter
                 }
 
+                Button {
+                  id: phButton
+                  visible: phRow.isSwitch
+                  text: phRow.armed ? "Click again to enable 48V" : (phRow.live ? "48V LIVE" : "48V OFF")
+                  bordered: true
+                  selected: phRow.live || phRow.armed
+                  accent: phRow.armed ? root.cautionColor : Commons.Color.urgent
+                  enabled: !!modelData.rw
+                  opacity: modelData.rw ? 1.0 : 0.45
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  fontSize: Style.font.caption
+                  verticalPadding: Style.space(3)
+                  tooltipText: phRow.live
+                    ? "48V is on. Click to turn it off."
+                    : "Click, then click again within 3 s, to enable 48V"
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  onClicked: root.clickPhantom(modelData)
+                }
+
                 ToggleSwitch {
                   id: phSwitch
+                  visible: !phRow.isSwitch
                   checked: !!modelData.active
                   enabled: !!modelData.rw
                   opacity: modelData.rw ? 1.0 : 0.45
@@ -621,9 +689,13 @@ Panel {
                       visible: modelData.mute_numid !== null && modelData.mute_numid !== undefined
                       enabled: !!modelData.mute_rw
                       opacity: modelData.mute_rw ? 1.0 : 0.45
-                      text: modelData.muted ? "MUTED" : "ON"
+                      // Always "MUTE": filled urgent when muted, a quiet outline when live.
+                      text: "MUTE"
                       bordered: true
-                      selected: !modelData.muted
+                      selected: !!modelData.muted
+                      accent: Commons.Color.urgent
+                      tooltipText: modelData.muted ? "Muted. Click to unmute." : "Click to mute"
+
                       foreground: root.fg
                       fontFamily: root.fontFamily
                       fontSize: Style.font.caption
