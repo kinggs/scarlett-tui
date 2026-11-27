@@ -653,7 +653,9 @@ Panel {
     open: root.opened
     focusTarget: panel.loadedContent
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(620))
+    // Tall enough for a 4i4 without scrolling (620 cut off its last output).
+    // The shell also stops the card at the screen edge, so small screens scroll.
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(760))
 
     content: PanelKeyCatcher {
       id: keyCatcher
