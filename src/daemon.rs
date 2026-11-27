@@ -120,6 +120,27 @@ struct MeterPayload {
     clip_any: bool,
 }
 
+/// Clip latch state, sent when a channel newly latches while the panel is closed
+/// and after `clip clear`, so the bar icon can show a clip ring.
+#[derive(Serialize)]
+struct ClipPayload {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    clip: Vec<bool>,
+    clip_any: bool,
+}
+
+fn clip_payload(clips: &ClipLatch) -> ClipPayload {
+    ClipPayload {
+        msg_type: "clip",
+        clip: clips.as_slice().to_vec(),
+        clip_any: clips.any(),
+    }
+}
+
+/// How often the daemon reads meters for clips while the panel is closed.
+const CLIP_WATCH_EVERY: Duration = Duration::from_millis(200);
+
 /// Incremental, bounded byte accumulator for non-blocking line-oriented stdin.
 /// Preserves partial lines across `WouldBlock` reads and handles multiple
 /// commands per chunk cleanly.
@@ -733,6 +754,7 @@ impl DaemonState {
             }
             DaemonCmd::ClipClear => {
                 self.clips.clear();
+                emit_json(&clip_payload(&self.clips))?;
             }
             DaemonCmd::Refresh => {
                 self.pw.request_refresh();
@@ -814,6 +836,7 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
         pw: PwMonitor::spawn(),
     };
     let mut last_meter = Instant::now();
+    let mut last_clip_watch = Instant::now();
     let mut last_scan = Instant::now() - Duration::from_secs(10);
     let mut last_poll_fallback = Instant::now();
     let mut last_rate_poll = Instant::now();
@@ -888,6 +911,8 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
 
         let timeout_ms = if state.meters_on && state.alsa.is_some() {
             50
+        } else if state.alsa.is_some() {
+            CLIP_WATCH_EVERY.as_millis() as i32
         } else {
             500
         };
@@ -930,6 +955,24 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
             return 0;
         }
 
+        // 5. With the panel closed, watch for clips at 5 Hz and report new latches.
+        if !state.meters_on
+            && last_clip_watch.elapsed() >= CLIP_WATCH_EVERY
+            && let (Some(alsa), Some(model)) = (&state.alsa, &state.model)
+            && let Some(mid) = model.meter_numid
+            && let Some(mc) = model.controls.get(&mid)
+            && let Ok(raw) = alsa.read_values(mid, mc.kind, mc.count)
+        {
+            last_clip_watch = Instant::now();
+            let dbfs: Vec<f64> = raw
+                .iter()
+                .map(|&v| meter_to_dbfs_with_max(v, model.meter_max))
+                .collect();
+            if state.clips.update(&dbfs) && emit_json(&clip_payload(&state.clips)).is_err() {
+                return 0;
+            }
+        }
+
         // 4. Stream hardware meters when requested (panel open)
         if state.meters_on
             && last_meter.elapsed() >= Duration::from_millis(50)
@@ -962,6 +1005,16 @@ pub fn run_daemon(card_override: Option<u32>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_payload_reports_latched_channels() {
+        let mut clips = ClipLatch::default();
+        clips.update(&[-20.0, 0.0]);
+        let v = serde_json::to_value(clip_payload(&clips)).unwrap();
+        assert_eq!(v["type"], "clip");
+        assert_eq!(v["clip"], serde_json::json!([false, true]));
+        assert_eq!(v["clip_any"], true);
+    }
 
     #[test]
     fn line_accumulator_handles_fragmented_commands() {

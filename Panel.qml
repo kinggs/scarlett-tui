@@ -30,6 +30,9 @@ Panel {
   property var meterLabels: []
   property var meterDbfs: []
   property int expandedOutput: -1
+  // Clip latch from the daemon (meters frames while open, "clip" messages while closed).
+  property bool clipAny: false
+  property var clipFlags: []
   // numid of the 48V switch waiting for its confirming click, or -1.
   property int armedPhantom: -1
 
@@ -71,6 +74,50 @@ Panel {
     parts.push(locked ? "LOCKED" : String(syncStatus || "UNLOCKED").toUpperCase())
     if (firmware !== null && firmware !== undefined) parts.push("FW " + String(firmware))
     return parts.join(" · ")
+  }
+
+  // Bar button state (docs/DESIGN.md states table, bar-states board).
+  readonly property string barState: !daemonOnline ? "backend"
+    : !connected ? "disconnected"
+    : !mixerAvailable ? "nomixer"
+    : "ok"
+
+  readonly property string phantomText: {
+    var on = []
+    for (var i = 0; i < phantom.length; i++) {
+      var lbl = String(phantom[i].label || "")
+      if (lbl.indexOf("Remember") < 0 && phantom[i].active) on.push(lbl)
+    }
+    return on.join(", ")
+  }
+
+  readonly property string clippedText: {
+    var names = []
+    for (var i = 0; i < meterLabels.length; i++) {
+      var m = meterLabels[i]
+      if (m && clipFlags[m.index]) names.push(String(m.label || ("Ch " + (m.index + 1))))
+    }
+    if (names.length === 0 && clipAny) return "a channel"
+    return names.join(", ")
+  }
+
+  readonly property string barTooltip: {
+    var mouse = "Left: panel · Right: TUI · Scroll: nothing"
+    if (barState === "backend") return "Scarlett backend restarting\n" + mouse
+    if (barState === "disconnected") return "No Scarlett connected\nPlug in to restore · " + mouse
+    if (barState === "nomixer") return "Scarlett found, no mixer controls\nCheck fcp-server or kernel ≥ 6.7"
+    var lines = []
+    if (clipAny) lines.push("Clipped: " + clippedText + " · open panel to clear")
+    if (anyPhantomOn) lines.push("48V on " + phantomText)
+    lines.push(titleText + " · " + subtitleText)
+    lines.push(mouse)
+    return lines.join("\n")
+  }
+
+  function clearClips() {
+    send("clip clear")
+    clipAny = false
+    clipFlags = []
   }
 
   readonly property bool anyPhantomOn: {
@@ -249,8 +296,12 @@ Panel {
     if (msg.type === "error") {
       lastError = String(msg.message || "Control update failed")
       errorTimer.restart()
-    } else if (msg.type === "meters") {
-      meterDbfs = msg.dbfs || []
+    } else if (msg.type === "meters" || msg.type === "clip") {
+      if (msg.type === "meters") meterDbfs = msg.dbfs || []
+      if (msg.clip !== undefined) {
+        clipFlags = msg.clip || []
+        clipAny = !!msg.clip_any
+      }
     } else if (msg.type === "state") {
       var wasConnected = connected
       connected = !!msg.connected
@@ -270,6 +321,8 @@ Panel {
       meterLabels = msg.meter_labels || []
       if (!connected || !mixerAvailable) {
         meterDbfs = []
+        clipAny = false
+        clipFlags = []
         expandedOutput = -1
       } else if (expandedOutput >= outputs.length) {
         expandedOutput = -1
@@ -314,6 +367,8 @@ Panel {
       root.mixerAvailable = false
       root.stateGeneration = 0
       root.meterDbfs = []
+      root.clipAny = false
+      root.clipFlags = []
       root.expandedOutput = -1
       restartTimer.start()
     }
@@ -344,18 +399,52 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: (root.connected && root.mixerAvailable) ? "󰓃" : "󰓄"
-    opacity: (root.connected && root.mixerAvailable) ? 1.0 : 0.45
-    tooltipText: !root.daemonOnline
-      ? "Scarlett backend unavailable (restarting)"
-      : root.connected
-        ? root.titleText + (root.anyPhantomOn ? " · 48V LIVE" : "") + " · " + root.subtitleText
-          + " (right-click: open TUI · scroll: no action)"
-        : "Scarlett not connected"
+    // One glyph; state shown by shape (slash, badge, ring, dot), not only colour.
+    text: (root.barState === "ok" || root.barState === "nomixer") ? "󰓃" : "󰓄"
+    opacity: root.barState === "ok" ? 1.0 : (root.barState === "nomixer" ? 0.55 : 0.45)
+    tooltipText: root.barTooltip
     onPressed: function(b) {
       if (b === Qt.RightButton || b === Qt.MiddleButton) root.openTui()
       else root.toggle()
     }
+  }
+
+  // Clip latched: an urgent ring round the bar icon.
+  Rectangle {
+    visible: root.barState === "ok" && root.clipAny
+    anchors.centerIn: button
+    width: Math.min(button.width, button.height) - Style.space(2)
+    height: width
+    radius: Style.space(5)
+    color: "transparent"
+    border.color: Commons.Color.urgent
+    border.width: Math.max(1, Style.space(1.5))
+  }
+
+  // Backend restarting: a faint outline round the (slashed) glyph.
+  Rectangle {
+    visible: root.barState === "backend"
+    anchors.centerIn: button
+    width: Math.min(button.width, button.height) - Style.space(2)
+    height: width
+    radius: Style.space(5)
+    color: "transparent"
+    border.color: Util.alpha(root.barFg, 0.4)
+    border.width: 1
+  }
+
+  // Mixer unavailable: a caution "!" beside the dimmed glyph.
+  Text {
+    visible: root.barState === "nomixer"
+    textFormat: Text.PlainText
+    text: "!"
+    color: root.cautionColor
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.caption
+    font.bold: true
+    anchors.top: button.top
+    anchors.right: button.right
+    anchors.rightMargin: Style.space(2)
   }
 
   // 48V live: a small urgent dot on the bar icon (docs/DESIGN.md "48V live").
@@ -471,6 +560,41 @@ Panel {
                 elide: Text.ElideRight
                 width: parent.width
               }
+            }
+          }
+
+          // ---------- Clip alert (latched until cleared) ----------
+          Item {
+            visible: root.connected && root.mixerAvailable && root.clipAny
+            width: parent.width
+            implicitHeight: clipClear.implicitHeight
+
+            Text {
+              textFormat: Text.PlainText
+              text: "CLIP  " + root.clippedText
+              color: Commons.Color.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              elide: Text.ElideRight
+              anchors.left: parent.left
+              anchors.right: clipClear.left
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Button {
+              id: clipClear
+              text: "Clear"
+              bordered: true
+              foreground: root.fg
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              verticalPadding: Style.space(2)
+              tooltipText: "Clear the clip latch"
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              onClicked: root.clearClips()
             }
           }
 
