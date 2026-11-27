@@ -87,7 +87,7 @@ a glyph, a word, a modifier or a badge.
 | Unknown value | `?` in Yellow `BOLD` | `—` with a tooltip | Control exists, value unreadable. |
 | Mixer unavailable | Yellow `▲` header; body shows fix steps | Icon dim + `!` badge; panel shows fix steps | Device present, no controls. |
 | Disconnected | Red `✕` header; centred empty state | Slashed glyph `󰓄`, opacity 0.45 | Distinct from backend down (panel only). |
-| PipeWire link | Magenta type tag; loopback `⟲ loopback` | Count in the footer status line | Software, not stored on the interface. |
+| PipeWire link | Magenta type tag; loopback `⟲ loopback` | Not shown; the PipeWire graph is in the TUI | Software, not stored on the interface. |
 
 ## Glyphs
 
@@ -203,7 +203,11 @@ Any other key also cancels an armed action, then acts normally.
 | `m` | Mute the output under the cursor |
 | `C` | Clear clip latches |
 | `r` / `T` | Refresh / open the TUI |
+| `?` | Show or hide the key list in the footer |
 | `Esc` | Collapse, then close |
+
+`h` `j` `k` `l` also move. ⚠ The shell's key catcher reports Enter and Space
+as one "activate", so in the panel Enter also toggles and arms 48V.
 
 ## Layout
 
@@ -230,7 +234,9 @@ Any other key also cancels an armed action, then acts normally.
   (`● Locked · 48 kHz · Gen 3`); firmware in the tooltip. One `TUI` button.
   Sections: INPUTS (meter, then chips, then the 48V row) and OUTPUTS (meter,
   level, `MUTE`, then source). The alert strip is for clips only. The footer
-  is the key line.
+  is the key line, and `?` swaps it for the key list. When a model's meters
+  cannot be matched to its outputs by name, a separate LEVELS list is shown
+  instead.
 
 ## Colour-free modes
 
