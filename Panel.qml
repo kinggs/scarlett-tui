@@ -33,6 +33,20 @@ Panel {
   // numid of the 48V switch waiting for its confirming click, or -1.
   property int armedPhantom: -1
 
+  // Keyboard cursor: one row cursor across inputs, 48V and outputs; Left/Right
+  // moves across an input's chips or an expanded output's sources.
+  property int navCursor: -1
+  property int chipCursor: 0
+  property int routeCursor: -1
+  readonly property var navRows: {
+    var rows = []
+    for (var i = 0; i < inputs.length; i++)
+      if ((inputs[i].toggles || []).length > 0) rows.push({ kind: "input", index: i })
+    for (var p = 0; p < phantom.length; p++) rows.push({ kind: "phantom", index: p })
+    for (var o = 0; o < outputs.length; o++) rows.push({ kind: "output", index: o })
+    return rows
+  }
+
   readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property color barFg: bar ? bar.barForeground : Commons.Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -123,6 +137,74 @@ Panel {
     }
   }
 
+  function navRow() {
+    return (navCursor >= 0 && navCursor < navRows.length) ? navRows[navCursor] : null
+  }
+
+  function hasNav(kind, index) {
+    var row = navRow()
+    return !!row && row.kind === kind && row.index === index
+  }
+
+  function clampInt(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+
+  function moveCursor(dx, dy) {
+    if (navRows.length === 0) return
+    if (dy !== 0) {
+      navCursor = navCursor < 0 ? 0 : clampInt(navCursor + dy, 0, navRows.length - 1)
+      chipCursor = 0
+      routeCursor = -1
+      var r = navRow()
+      if (expandedOutput >= 0 && !(r.kind === "output" && r.index === expandedOutput)) expandedOutput = -1
+      return
+    }
+    var row = navRow()
+    if (!row) return
+    if (row.kind === "input") {
+      var n = (inputs[row.index].toggles || []).length
+      chipCursor = clampInt(chipCursor + dx, 0, Math.max(0, n - 1))
+    } else if (row.kind === "output" && expandedOutput === row.index) {
+      var out = outputs[row.index]
+      var items = out.route_items || []
+      var from = routeCursor >= 0 ? routeCursor : Number(out.route_val || 0)
+      routeCursor = clampInt(from + dx, 0, Math.max(0, items.length - 1))
+    }
+  }
+
+  // Enter and Space: toggle the chip, arm/confirm 48V, expand an output, or set
+  // the highlighted source of an expanded output.
+  function activateCursor() {
+    var row = navRow()
+    if (!row) { if (navRows.length > 0) navCursor = 0; return }
+    if (row.kind === "input") {
+      var t = (inputs[row.index].toggles || [])[chipCursor]
+      if (t) cycleToggle(t)
+    } else if (row.kind === "phantom") {
+      var ph = phantom[row.index]
+      if (String(ph.label || "").indexOf("Remember") < 0) clickPhantom(ph)
+      else cycleToggle(ph)
+    } else if (row.kind === "output") {
+      var out = outputs[row.index]
+      var routable = out.route_numid !== null && out.route_numid !== undefined && out.route_rw
+      if (expandedOutput === row.index && routeCursor >= 0 && routable) {
+        setControl(out.route_numid, routeCursor)
+        expandedOutput = -1
+        routeCursor = -1
+      } else if (routable) {
+        expandedOutput = expandedOutput === row.index ? -1 : row.index
+        routeCursor = -1
+      }
+    }
+  }
+
+  function muteCursor() {
+    var row = navRow()
+    if (!row || row.kind !== "output") return
+    var out = outputs[row.index]
+    if (out.mute_numid !== null && out.mute_numid !== undefined && out.mute_rw)
+      setControl(out.mute_numid, out.muted ? 0 : 1)
+  }
+
   function openTui() {
     Quickshell.execDetached([
       "omarchy-launch-or-focus-tui",
@@ -201,6 +283,8 @@ Panel {
   onOpenedChanged: {
     expandedOutput = -1
     armedPhantom = -1
+    navCursor = -1
+    routeCursor = -1
     if (opened) {
       send("refresh")
       send("meters on")
@@ -306,9 +390,12 @@ Panel {
         else root.close()
       }
       onTabRequested: function(direction) { root.switchPanel(direction) }
+      onMoveRequested: function(dx, dy) { root.moveCursor(dx, dy) }
+      onActivateRequested: root.activateCursor()
       onTextKey: function(t) {
         if (t === "t" || t === "T") root.openTui()
         else if (t === "r" || t === "R") root.send("refresh")
+        else if (t === "m" || t === "M") root.muteCursor()
       }
 
       ScrollView {
@@ -488,7 +575,9 @@ Panel {
               model: root.inputs
 
               Item {
+                id: inRow
                 required property var modelData
+                required property int index
                 width: panelColumn.width
                 implicitHeight: Math.max(inLabel.implicitHeight, chipRow.implicitHeight)
 
@@ -514,6 +603,8 @@ Panel {
 
                     Button {
                       required property var modelData
+                      required property int index
+                      hasCursor: root.hasNav("input", inRow.index) && root.chipCursor === index
                       text: {
                         if (modelData.kind === "enum" && modelData.active && modelData.label === "AIR")
                           return "AIR · " + String(modelData.text || "")
@@ -541,6 +632,7 @@ Panel {
               Item {
                 id: phRow
                 required property var modelData
+                required property int index
                 // "Remember 48V" is a persistence setting, not phantom power itself.
                 readonly property bool isSwitch: String(modelData.label || "").indexOf("Remember") < 0
                 readonly property bool live: isSwitch && !!modelData.active
@@ -563,6 +655,7 @@ Panel {
                 Button {
                   id: phButton
                   visible: phRow.isSwitch
+                  hasCursor: root.hasNav("phantom", phRow.index)
                   text: phRow.armed ? "Click again to enable 48V" : (phRow.live ? "48V LIVE" : "48V OFF")
                   bordered: true
                   selected: phRow.live || phRow.armed
@@ -584,6 +677,7 @@ Panel {
                 ToggleSwitch {
                   id: phSwitch
                   visible: !phRow.isSwitch
+                  hasCursor: root.hasNav("phantom", phRow.index)
                   checked: !!modelData.active
                   enabled: !!modelData.rw
                   opacity: modelData.rw ? 1.0 : 0.45
@@ -644,7 +738,7 @@ Panel {
                   width: parent.width
                   height: outRow.implicitHeight + Style.space(10)
                   foreground: root.fg
-                  hasCursor: root.expandedOutput === index
+                  hasCursor: root.hasNav("output", index) || root.expandedOutput === index
 
                   Item {
                     id: outRow
@@ -737,6 +831,7 @@ Panel {
                       required property var modelData
                       required property int index
                       readonly property var parentOut: root.outputs[root.expandedOutput]
+                      hasCursor: root.routeCursor === index
                       text: String(modelData)
                       bordered: true
                       selected: parentOut && parentOut.route_val !== null && parentOut.route_val !== undefined
