@@ -65,16 +65,17 @@ Panel {
     if (!daemonOnline) return "BACKEND UNAVAILABLE · RESTARTING"
     if (!connected) return "NOT CONNECTED"
     if (!mixerAvailable) return "MIXER UNAVAILABLE · CHECK DRIVER / FCP-SERVER"
-    var parts = []
-    if (card.generation) parts.push(String(card.generation).toUpperCase())
+    // Status pills: sync · rate · generation. Firmware lives in the tooltip.
+    var parts = [locked ? "● Locked" : "▲ " + String(syncStatus || "Unlocked")]
     if (activeRate) {
       var khz = Number(activeRate) / 1000
-      parts.push((Math.round(khz) === khz ? khz.toString() : khz.toFixed(1)) + " KHZ")
+      parts.push((Math.round(khz) === khz ? khz.toString() : khz.toFixed(1)) + " kHz")
     }
-    parts.push(locked ? "LOCKED" : String(syncStatus || "UNLOCKED").toUpperCase())
-    if (firmware !== null && firmware !== undefined) parts.push("FW " + String(firmware))
+    if (card.generation) parts.push(String(card.generation))
     return parts.join(" · ")
   }
+
+  readonly property string firmwareText: (firmware !== null && firmware !== undefined) ? " · FW " + String(firmware) : ""
 
   // Bar button state (docs/DESIGN.md states table, bar-states board).
   readonly property string barState: !daemonOnline ? "backend"
@@ -109,7 +110,7 @@ Panel {
     var lines = []
     if (clipAny) lines.push("Clipped: " + clippedText + " · open panel to clear")
     if (anyPhantomOn) lines.push("48V on " + phantomText)
-    lines.push(titleText + " · " + subtitleText)
+    lines.push(titleText + " · " + subtitleText + firmwareText)
     lines.push(mouse)
     return lines.join("\n")
   }
@@ -137,15 +138,127 @@ Panel {
       if (m.group === "Analogue Outputs" || m.group === "PC Capture (Rec)") {
         out.push(m)
       }
-      if (out.length >= 6) break
+      if (out.length >= 12) break
     }
     if (out.length === 0) {
-      for (var j = 0; j < meterLabels.length && out.length < 6; j++) {
+      for (var j = 0; j < meterLabels.length && out.length < 12; j++) {
         var fm = meterLabels[j]
         if (fm && fm.group === "Meters") out.push(fm)
       }
     }
     return out
+  }
+
+  // Stereo pairs: neighbours in the same group share one row with two bars.
+  readonly property var meterPairs: {
+    var v = visibleMeters
+    var pairs = []
+    var i = 0
+    while (i < v.length) {
+      var a = v[i]
+      var b = (i + 1 < v.length && v[i + 1].group === a.group) ? v[i + 1] : null
+      pairs.push({ label: pairLabel(a, b), a: a.index, b: b ? b.index : -1 })
+      i += b ? 2 : 1
+    }
+    return pairs
+  }
+
+  function pairLabel(a, b) {
+    var neutral = /^Meter \d+$/
+    if (neutral.test(String(a.label || "")))
+      return b ? ("Ch " + (a.index + 1) + "–" + (b.index + 1)) : ("Ch " + (a.index + 1))
+    var s = String(a.label || "")
+    var inParens = s.match(/\(([^)]*)\)/)
+    if (inParens) s = inParens[1]
+    return b ? s.replace(/\s+(L|R|Left|Right)$/, "") : s
+  }
+
+  // Peak hold per channel: 1.5 s, then falls (docs/DESIGN.md "Meter zones").
+  property var meterPeak: []
+  property var meterPeakAt: []
+
+  function updatePeaks(dbfs) {
+    var now = Date.now()
+    var peaks = meterPeak.slice(0, dbfs.length)
+    var at = meterPeakAt.slice(0, dbfs.length)
+    for (var i = 0; i < dbfs.length; i++) {
+      var db = Number(dbfs[i])
+      if (peaks[i] === undefined || db >= peaks[i] || now - at[i] > 1500) {
+        peaks[i] = db
+        at[i] = now
+      }
+    }
+    meterPeak = peaks
+    meterPeakAt = at
+  }
+
+  function peakFraction(idx) {
+    if (idx < 0 || idx >= meterPeak.length) return 0
+    var db = Number(meterPeak[idx])
+    if (isNaN(db) || db <= -60) return 0
+    return Math.min(1, (db + 60) / 60)
+  }
+
+  function pairDbText(a, b) {
+    if (b < 0) return meterDbText(a)
+    var da = Number(meterDbfs[a]), dbb = Number(meterDbfs[b])
+    return meterDbText((isNaN(dbb) || da >= dbb) ? a : b)
+  }
+
+  // Source chips grouped by type; over 24 sources, only PCM and Mix are shown.
+  function sourceGroup(name) {
+    if (name.indexOf("PCM ") === 0) return { order: 0, title: "PC playback" }
+    if (name.indexOf("Mix ") === 0) return { order: 1, title: "Mixes" }
+    if (name.indexOf("Analogue") === 0 || name.indexOf("Line") === 0) return { order: 2, title: "Analogue" }
+    if (name.indexOf("S/PDIF") >= 0) return { order: 3, title: "S/PDIF" }
+    if (name.indexOf("ADAT") === 0) return { order: 4, title: "ADAT" }
+    if (name === "Off") return { order: 6, title: "Off" }
+    return { order: 5, title: "Other" }
+  }
+
+  function routeGroups(out) {
+    var items = (out && out.route_items) || []
+    var capped = items.length > 24
+    var groups = {}
+    var hidden = 0
+    for (var i = 0; i < items.length; i++) {
+      var name = String(items[i])
+      var g = sourceGroup(name)
+      if (capped && g.order > 1) { hidden++; continue }
+      if (!groups[g.order]) groups[g.order] = { order: g.order, title: g.title, items: [] }
+      groups[g.order].items.push({ name: name, index: i })
+    }
+    var list = []
+    for (var k in groups) list.push(groups[k])
+    list.sort(function(x, y) { return x.order - y.order })
+    return { groups: list, hidden: hidden }
+  }
+
+  function shownRouteIndices(out) {
+    var idx = []
+    var gs = routeGroups(out).groups
+    for (var i = 0; i < gs.length; i++)
+      for (var j = 0; j < gs[i].items.length; j++) idx.push(gs[i].items[j].index)
+    return idx
+  }
+
+  // Input toggles in fixed columns (union of labels, in first-seen order).
+  readonly property var inputColumns: {
+    var cols = []
+    for (var i = 0; i < inputs.length; i++) {
+      var ts = inputs[i].toggles || []
+      for (var j = 0; j < ts.length; j++) {
+        var l = String(ts[j].label || "")
+        if (cols.indexOf(l) < 0) cols.push(l)
+      }
+    }
+    return cols
+  }
+
+  function toggleIndex(input, label) {
+    var ts = (input && input.toggles) || []
+    for (var i = 0; i < ts.length; i++) if (String(ts[i].label || "") === label) return i
+    return -1
   }
 
   function send(line) {
@@ -213,8 +326,10 @@ Panel {
     } else if (row.kind === "output" && expandedOutput === row.index) {
       var out = outputs[row.index]
       var items = out.route_items || []
-      var from = routeCursor >= 0 ? routeCursor : Number(out.route_val || 0)
-      routeCursor = clampInt(from + dx, 0, Math.max(0, items.length - 1))
+      var shown = shownRouteIndices(out)
+      if (shown.length === 0) return
+      var from = shown.indexOf(routeCursor >= 0 ? routeCursor : Number(out.route_val || 0))
+      routeCursor = shown[clampInt((from < 0 ? 0 : from) + dx, 0, shown.length - 1)]
     }
   }
 
@@ -297,7 +412,10 @@ Panel {
       lastError = String(msg.message || "Control update failed")
       errorTimer.restart()
     } else if (msg.type === "meters" || msg.type === "clip") {
-      if (msg.type === "meters") meterDbfs = msg.dbfs || []
+      if (msg.type === "meters") {
+        meterDbfs = msg.dbfs || []
+        updatePeaks(meterDbfs)
+      }
       if (msg.clip !== undefined) {
         clipFlags = msg.clip || []
         clipAny = !!msg.clip_any
@@ -552,11 +670,10 @@ Panel {
               Text {
                 text: root.subtitleText
                 textFormat: Text.PlainText
-                color: Qt.darker(root.fg, 1.4)
+                color: (root.connected && root.mixerAvailable && root.locked) ? root.fg : root.cautionColor
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
                 font.bold: true
-                font.letterSpacing: 1.0
                 elide: Text.ElideRight
                 width: parent.width
               }
@@ -627,8 +744,35 @@ Panel {
               fontFamily: root.fontFamily
             }
 
+            component MeterTrack: Rectangle {
+              property int idx: -1
+              height: Style.space(3)
+              radius: height / 2
+              color: Style.normalFillFor(root.fg, Commons.Color.accent)
+
+              Rectangle {
+                width: parent.width * root.meterFraction(parent.idx)
+                height: parent.height
+                radius: parent.radius
+                color: root.meterColor(parent.idx)
+                Behavior on width {
+                  NumberAnimation { duration: Style.duration(45); easing.type: Easing.OutCubic }
+                }
+              }
+
+              // Peak-hold tick.
+              Rectangle {
+                visible: root.peakFraction(parent.idx) > 0
+                x: Math.max(0, parent.width * root.peakFraction(parent.idx) - width)
+                width: Math.max(1, Style.space(2))
+                height: parent.height + Style.space(2)
+                anchors.verticalCenter: parent.verticalCenter
+                color: root.fg
+              }
+            }
+
             Repeater {
-              model: root.visibleMeters
+              model: root.meterPairs
 
               Row {
                 required property var modelData
@@ -636,42 +780,43 @@ Panel {
                 spacing: Style.space(8)
 
                 Text {
-                  width: Style.space(115)
+                  width: Style.space(92)
                   textFormat: Text.PlainText
                   text: String(modelData.label || "")
-                  color: Qt.darker(root.fg, 1.15)
+                  color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
                   anchors.verticalCenter: parent.verticalCenter
                 }
 
-                Rectangle {
-                  width: Math.max(Style.space(80), panelColumn.width - Style.space(175))
-                  height: Style.space(6)
-                  radius: height / 2
-                  color: Style.normalFillFor(root.fg, Commons.Color.accent)
+                Column {
+                  width: Math.max(Style.space(80), panelColumn.width - Style.space(176))
+                  spacing: Style.space(2)
                   anchors.verticalCenter: parent.verticalCenter
 
-                  Rectangle {
-                    width: parent.width * root.meterFraction(modelData.index)
-                    height: parent.height
-                    radius: parent.radius
-                    color: root.meterColor(modelData.index)
-                    Behavior on width {
-                      NumberAnimation { duration: Style.duration(45); easing.type: Easing.OutCubic }
-                    }
-                  }
+                  MeterTrack { width: parent.width; idx: modelData.a }
+                  MeterTrack { width: parent.width; idx: modelData.b; visible: modelData.b >= 0 }
                 }
 
                 Text {
                   width: Style.space(42)
                   horizontalAlignment: Text.AlignRight
                   textFormat: Text.PlainText
-                  text: root.meterDbText(modelData.index)
-                  color: Qt.darker(root.fg, 1.35)
+                  text: root.pairDbText(modelData.a, modelData.b)
+                  color: Util.alpha(root.fg, 0.66)
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
+                  anchors.verticalCenter: parent.verticalCenter
+                }
+
+                // Latched clip dot.
+                Rectangle {
+                  width: Style.space(8)
+                  height: width
+                  radius: width / 2
+                  color: (root.clipFlags[modelData.a] || (modelData.b >= 0 && root.clipFlags[modelData.b]))
+                    ? Commons.Color.urgent : "transparent"
                   anchors.verticalCenter: parent.verticalCenter
                 }
               }
@@ -695,55 +840,84 @@ Panel {
               fontFamily: root.fontFamily
             }
 
+            Row {
+              visible: root.inputColumns.length > 0
+              width: panelColumn.width
+              spacing: Style.space(6)
+
+              Item { width: Style.space(92); height: 1 }
+
+              Repeater {
+                model: root.inputColumns
+
+                Text {
+                  required property var modelData
+                  width: (panelColumn.width - Style.space(92) - Style.space(6) * root.inputColumns.length) / Math.max(1, root.inputColumns.length)
+                  textFormat: Text.PlainText
+                  text: String(modelData).toLowerCase()
+                  color: Util.alpha(root.fg, 0.66)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+
             Repeater {
               model: root.inputs
 
-              Item {
+              Row {
                 id: inRow
                 required property var modelData
                 required property int index
                 width: panelColumn.width
-                implicitHeight: Math.max(inLabel.implicitHeight, chipRow.implicitHeight)
+                spacing: Style.space(6)
 
                 Text {
-                  id: inLabel
+                  width: Style.space(92)
                   textFormat: Text.PlainText
-                  text: String(modelData.label || "")
+                  text: String(inRow.modelData.label || "")
                   color: root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
-                  anchors.left: parent.left
+                  elide: Text.ElideRight
                   anchors.verticalCenter: parent.verticalCenter
                 }
 
-                Row {
-                  id: chipRow
-                  spacing: Style.space(6)
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
+                Repeater {
+                  model: root.inputColumns
 
-                  Repeater {
-                    model: modelData.toggles || []
+                  // One fixed column per control type; blank where this input lacks it.
+                  Item {
+                    id: cell
+                    required property var modelData
+                    readonly property int tIndex: root.toggleIndex(inRow.modelData, String(modelData))
+                    readonly property var toggle: tIndex >= 0 ? inRow.modelData.toggles[tIndex] : null
+                    width: (panelColumn.width - Style.space(92) - Style.space(6) * root.inputColumns.length) / Math.max(1, root.inputColumns.length)
+                    implicitHeight: chip.implicitHeight
 
                     Button {
-                      required property var modelData
-                      required property int index
-                      hasCursor: root.hasNav("input", inRow.index) && root.chipCursor === index
+                      id: chip
+                      visible: cell.toggle !== null
+                      width: parent.width
+                      hasCursor: root.hasNav("input", inRow.index) && root.chipCursor === cell.tIndex
                       text: {
-                        if (modelData.kind === "enum" && modelData.active && modelData.label === "AIR")
-                          return "AIR · " + String(modelData.text || "")
-                        return String(modelData.label || "")
+                        var t = cell.toggle
+                        if (!t) return ""
+                        if (t.kind === "enum" && t.active && t.label === "AIR") return "AIR · " + String(t.text || "")
+                        if (t.kind === "enum") return String(t.text || t.label || "")
+                        return String(t.label || "")
                       }
                       bordered: true
-                      selected: !!modelData.active
-                      enabled: !!modelData.rw
-                      opacity: modelData.rw ? 1.0 : 0.45
+                      selected: !!(cell.toggle && cell.toggle.active)
+                      enabled: !!(cell.toggle && cell.toggle.rw)
+                      opacity: (cell.toggle && cell.toggle.rw) ? 1.0 : 0.45
                       foreground: root.fg
                       fontFamily: root.fontFamily
                       fontSize: Style.font.caption
                       verticalPadding: Style.space(3)
-                      tooltipText: String(modelData.label || "") + ": " + String(modelData.text || "")
-                      onClicked: root.cycleToggle(modelData)
+                      tooltipText: cell.toggle ? String(cell.toggle.label || "") + ": " + String(cell.toggle.text || "") : ""
+                      onClicked: root.cycleToggle(cell.toggle)
                     }
                   }
                 }
@@ -942,80 +1116,106 @@ Panel {
                   }
                 }
 
-                // Inline route picker chips when this output row is expanded
-                Flow {
+                // Inline source chips, grouped by type, when this output row is expanded
+                Column {
+                  id: srcCol
+                  readonly property var grouped: root.routeGroups(modelData)
+                  readonly property var outRow: modelData
                   visible: root.expandedOutput === index && modelData.route_items && modelData.route_items.length > 0
                   width: parent.width
                   spacing: Style.space(4)
 
                   Repeater {
-                    model: modelData.route_items || []
+                    model: srcCol.grouped.groups
 
-                    Button {
+                    Column {
                       required property var modelData
-                      required property int index
-                      readonly property var parentOut: root.outputs[root.expandedOutput]
-                      hasCursor: root.routeCursor === index
-                      text: String(modelData)
-                      bordered: true
-                      selected: parentOut && parentOut.route_val !== null && parentOut.route_val !== undefined
-                        ? Number(parentOut.route_val) === index
-                        : false
-                      enabled: parentOut ? !!parentOut.route_rw : false
-                      foreground: root.fg
-                      fontFamily: root.fontFamily
-                      fontSize: Style.font.caption
-                      verticalPadding: Style.space(2)
-                      onClicked: {
-                        if (parentOut && parentOut.route_numid !== null && parentOut.route_rw) {
-                          root.setControl(parentOut.route_numid, index)
-                          root.expandedOutput = -1
+                      width: srcCol.width
+                      spacing: Style.space(3)
+
+                      Text {
+                        textFormat: Text.PlainText
+                        text: String(modelData.title)
+                        color: Util.alpha(root.fg, 0.66)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+
+                      Flow {
+                        width: parent.width
+                        spacing: Style.space(4)
+
+                        Repeater {
+                          model: modelData.items
+
+                          Button {
+                            required property var modelData
+                            readonly property bool current: srcCol.outRow.route_val !== null && srcCol.outRow.route_val !== undefined
+                              && Number(srcCol.outRow.route_val) === modelData.index
+                            hasCursor: root.routeCursor === modelData.index
+                            text: (current ? "● " : "") + modelData.name
+                            bordered: true
+                            selected: current
+                            enabled: !!srcCol.outRow.route_rw
+                            foreground: root.fg
+                            fontFamily: root.fontFamily
+                            fontSize: Style.font.caption
+                            verticalPadding: Style.space(2)
+                            onClicked: {
+                              if (srcCol.outRow.route_numid !== null && srcCol.outRow.route_rw) {
+                                root.setControl(srcCol.outRow.route_numid, modelData.index)
+                                root.expandedOutput = -1
+                              }
+                            }
+                          }
                         }
                       }
                     }
+                  }
+
+                  Text {
+                    visible: srcCol.grouped.hidden > 0
+                    textFormat: Text.PlainText
+                    text: "Analogue, ADAT, S/PDIF: " + srcCol.grouped.hidden + " more in TUI"
+                    color: Util.alpha(root.fg, 0.66)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
                   }
                 }
               }
             }
           }
 
-          // ---------- Footer: Matrix + PipeWire links shortcut ----------
+          // ---------- Footer: status line (the hero TUI button opens the TUI) ----------
           PanelSeparator {
             visible: root.connected && root.mixerAvailable
             foreground: root.fg
           }
 
-          Item {
+          Column {
             visible: root.connected && root.mixerAvailable
             width: parent.width
-            implicitHeight: footerBtn.implicitHeight
+            spacing: Style.space(2)
 
             Text {
+              width: parent.width
               textFormat: Text.PlainText
-              text: root.pwScarlettLinks > 0
-                ? (root.pwScarlettLinks + " active PipeWire links · press T for matrix & links")
-                : "Press T for full Mix Matrix, Routing & PipeWire Links"
-              color: Qt.darker(root.fg, 1.4)
+              text: "PipeWire " + root.pwScarlettLinks + (root.pwScarlettLinks === 1 ? " link" : " links")
+                + (root.hasMatrix ? " · Matrix " + root.matrixSize : "")
+              color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideRight
-              anchors.left: parent.left
-              anchors.right: footerBtn.left
-              anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
             }
 
-            Button {
-              id: footerBtn
-              text: "Open Matrix"
-              bordered: true
-              foreground: root.fg
-              fontFamily: root.fontFamily
-              fontSize: Style.font.caption
-              verticalPadding: Style.space(3)
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              onClicked: root.openTui()
+            Text {
+              width: parent.width
+              textFormat: Text.PlainText
+              text: "↑↓ move · Enter sources · Space toggle · m mute · T TUI"
+              color: Util.alpha(root.fg, 0.66)
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
             }
           }
         }
