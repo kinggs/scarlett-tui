@@ -6,10 +6,22 @@ invariants to preserve.
 
 ## What this is
 
-A standalone Rust + Ratatui TUI and an Omarchy bar plugin (`Panel.qml`) for
-Focusrite Scarlett USB audio interfaces on Linux, MIT-licensed. One binary
-(`scarlett-tui`) serves both the terminal UI and the event-driven `--daemon`
-backend that `Panel.qml` talks to over JSON-lines.
+A Rust + Ratatui terminal UI for Focusrite Scarlett USB audio interfaces on
+Linux, MIT-licensed, plus an optional bar panel (`Panel.qml`) for Omarchy
+desktops. One binary (`scarlett-tui`) serves the terminal UI and an
+event-driven `--daemon` JSON-lines interface.
+
+**What runs where.** Say which one you mean in docs, issues and pull requests.
+
+- The TUI and the JSON interface (`--json`, `--daemon`) are plain Linux: ALSA
+  through `libasound`, optional PipeWire. Never make them depend on Omarchy.
+- The panel is Omarchy-only. It is a Quickshell QML plugin, but it imports
+  Omarchy's own `qs.Ui` and `qs.Commons`, so it is "the Omarchy bar panel",
+  not "a Quickshell widget". `manifest.json`, `scripts/check-plugin.sh` and
+  `make install-plugin` belong to it.
+- Write "Omarchy" only for something that needs Omarchy. Terminal colours,
+  the 95×30 size and the daemon are general; Omarchy is at most the example
+  or the place a number was measured.
 
 ## The map
 
@@ -53,11 +65,12 @@ backend that `Panel.qml` talks to over JSON-lines.
   - Keep `manifest.json` and `Panel.qml` at the repository root so the repo
     remains valid for the Omarchy Plugin Marketplace.
 - **ANSI palette colours only in `src/ui.rs`.** Avoid hardcoded RGB hex colours
-  in the TUI so it follows whichever terminal / Omarchy theme is active.
+  in the TUI so it follows whichever terminal theme is active.
 - **DarkGray is decoration only.** Use `Color::DarkGray` for borders, the empty
   meter track and `·`, never for text a user must read; secondary text is
-  `Color::Reset` + `Modifier::DIM`. Omarchy maps it to `muted`, measured at
-  1.9:1 contrast ([docs/DESIGN.md](docs/DESIGN.md)).
+  `Color::Reset` + `Modifier::DIM`. Themes often make ANSI bright-black very
+  faint: Omarchy's terminal themes map it to `muted`, measured at 1.9:1
+  contrast ([docs/DESIGN.md](docs/DESIGN.md)).
 - **No state by colour alone.** Every state pairs its colour with a glyph, a
   word, a modifier or a badge, because yellow and magenta are 2.3:1 in light
   themes. The state table is in [docs/DESIGN.md](docs/DESIGN.md), which wins
