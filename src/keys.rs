@@ -302,7 +302,8 @@ pub const KEYMAP: &[Binding] = &[
         Scope::Global,
         "1–5",
         "jump to tab",
-        Some("tabs"),
+        // The tab bar already shows the numbers.
+        None,
         &[
             (K::Char('1'), A::GoTab(0)),
             (K::Char('2'), A::GoTab(1)),
@@ -322,7 +323,7 @@ pub const KEYMAP: &[Binding] = &[
         Scope::Global,
         "r",
         "rescan device",
-        Some("rescan"),
+        None,
         &[(K::Char('r'), A::Rescan)],
     ),
     b(
