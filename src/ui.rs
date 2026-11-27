@@ -4016,12 +4016,14 @@ mod tests {
         out + "</g>\n</svg>\n"
     }
 
-    /// Writes `design/tui-*.svg` from the real TUI against an attached Scarlett.
-    /// Opens the ALSA control interface read-only (no writes, no PCM).
-    /// Run with: cargo test --locked -- --ignored capture_readme_screenshots
+    /// Renders the real TUI against an attached Scarlett into
+    /// `target/device-shots/tui-*.svg`, for checking a change on hardware.
+    /// Opens the ALSA control interface read-only (no writes, no PCM). The
+    /// README pictures come from the demo fixture instead: `make screenshots`.
+    /// Run with: cargo test --locked -- --ignored capture_device_screens
     #[test]
-    #[ignore = "needs a Scarlett attached; writes design/tui-*.svg"]
-    fn capture_readme_screenshots() {
+    #[ignore = "needs a Scarlett attached; writes target/device-shots/tui-*.svg"]
+    fn capture_device_screens() {
         let mut app = App::new(None, RenderOpts::default());
         assert!(app.model.is_some(), "no Scarlett attached");
         app.status_msg.clear();
@@ -4029,20 +4031,142 @@ mod tests {
             app.tick();
             std::thread::sleep(Duration::from_millis(60));
         }
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("design");
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/device-shots");
         std::fs::create_dir_all(&dir).unwrap();
-        let shot = |app: &App, name: &str, w: u16, h: u16| {
-            let svg = buffer_to_svg(&render_to_buffer(app, w, h));
+        for (name, svg) in shots(&mut app) {
             std::fs::write(dir.join(format!("tui-{name}.svg")), svg).unwrap();
-        };
-        shot(&app, "overview", 95, 30);
-        shot(&app, "overview-wide", 160, 36);
+        }
+    }
+
+    /// The five README screens of `app`, as `(name, svg)`.
+    fn shots(app: &mut App) -> Vec<(&'static str, String)> {
+        let shot = |app: &App, w: u16, h: u16| buffer_to_svg(&render_to_buffer(app, w, h));
+        let mut out = Vec::new();
+        app.tab = Tab::Overview;
+        out.push(("overview", shot(app, 95, 30)));
+        out.push(("overview-wide", shot(app, 160, 36)));
         app.tab = Tab::IoDevice;
-        shot(&app, "io", 95, 30);
+        out.push(("io", shot(app, 95, 30)));
         app.tab = Tab::Matrix;
-        shot(&app, "matrix", 95, 30);
+        out.push(("matrix", shot(app, 95, 30)));
         app.show_help = true;
-        shot(&app, "help", 95, 30);
+        out.push(("help", shot(app, 95, 30)));
+        app.show_help = false;
+        out
+    }
+
+    /// The demo the README shows: the `model_demo` fixture with scripted
+    /// meters. Nothing here reads a clock or a device, so the render is the
+    /// same on every machine.
+    fn demo_app() -> App {
+        let mut app = App::for_test(Some(crate::model::fixtures::model_demo()));
+        let max = app.model.as_ref().unwrap().meter_max as f64;
+        let raw = |db: f64| (max * 10f64.powf(db / 20.0)).round() as i64;
+        // dBFS per meter: 4 outputs, 8 mixer inputs, 6 capture channels.
+        // `None` is silence. The first frame is the louder one, so the peak
+        // ticks sit above the bars; it also clips capture channel 1.
+        let frame = |levels: [Option<f64>; 18]| levels.map(|l| l.map_or(0, raw)).to_vec();
+        let now = Instant::now();
+        app.ingest_meters(
+            frame([
+                Some(-8.0),
+                Some(-9.0),
+                Some(-12.0),
+                Some(-13.0),
+                Some(-3.0),
+                Some(-16.0),
+                Some(-11.0),
+                Some(-12.0),
+                Some(-24.0),
+                Some(-25.0),
+                None,
+                None,
+                Some(0.0),
+                Some(-16.0),
+                Some(-8.0),
+                Some(-9.0),
+                None,
+                None,
+            ]),
+            now,
+        );
+        app.ingest_meters(
+            frame([
+                Some(-14.0),
+                Some(-15.0),
+                Some(-18.0),
+                Some(-19.0),
+                Some(-7.0),
+                Some(-22.0),
+                Some(-16.0),
+                Some(-17.0),
+                Some(-30.0),
+                Some(-31.0),
+                None,
+                None,
+                Some(-7.0),
+                Some(-22.0),
+                Some(-14.0),
+                Some(-15.0),
+                None,
+                None,
+            ]),
+            now,
+        );
+        // Cursors on something worth looking at: Input 1's Air, and the
+        // second input of Mix A.
+        app.io_col = 1;
+        app.matrix_row = 1;
+        app
+    }
+
+    /// The committed `design/tui-*.svg` must match what the code draws, so the
+    /// README cannot fall behind the UI. `make screenshots` rewrites them (and
+    /// the PNGs) after a visible change.
+    #[test]
+    fn demo_screenshots_are_current() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("design");
+        let update = std::env::var_os("UPDATE_SCREENSHOTS").is_some();
+        let mut stale = Vec::new();
+        for (name, svg) in shots(&mut demo_app()) {
+            let path = dir.join(format!("tui-{name}.svg"));
+            if update {
+                std::fs::write(&path, svg).unwrap();
+            } else if std::fs::read_to_string(&path).ok().as_deref() != Some(svg.as_str()) {
+                stale.push(format!("design/tui-{name}.svg"));
+            }
+        }
+        assert!(
+            stale.is_empty(),
+            "README screenshots are out of date: {stale:?}. Run `make screenshots` and commit design/."
+        );
+    }
+
+    #[test]
+    fn demo_shows_the_states_the_readme_promises() {
+        let mut app = demo_app();
+        let overview = screen_text(&render_to_buffer(&app, 95, 30));
+        for needle in [
+            " 48V ",
+            "CLIP",
+            " MUTED ",
+            "← Mix A",
+            "← Analogue 1",
+            "48.0 kHz",
+        ] {
+            assert!(overview.contains(needle), "overview lacks {needle:?}");
+        }
+        assert!(!overview.contains(" more"), "every meter fits at 95×30");
+        app.tab = Tab::IoDevice;
+        let io = screen_text(&render_to_buffer(&app, 95, 30));
+        for needle in ["● Inst", "■ on", " 48V ", " MUTED ", "-12.0 dB"] {
+            assert!(io.contains(needle), "I/O lacks {needle:?}");
+        }
+        app.tab = Tab::Matrix;
+        let matrix = screen_text(&render_to_buffer(&app, 95, 30));
+        for needle in ["Mon L", "PhnL", "−6.0", "+3.0"] {
+            assert!(matrix.contains(needle), "matrix lacks {needle:?}");
+        }
     }
 
     #[test]

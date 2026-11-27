@@ -25,6 +25,8 @@ backend that `Panel.qml` talks to over JSON-lines.
 | `Panel.qml` | Omarchy bar widget + `KeyboardPanel` popup using `qs.Ui` and `qs.Commons` |
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |
 | `docs/DESIGN.md` | Design rules for both surfaces: rulings, semantic state table, glyphs, meter zones, keymap, layout |
+| `design/tui-*.svg`, `design/tui-*.png` | README screenshots, rendered from the `model_demo` fixture by `make screenshots`. The SVGs are the checked source; the PNGs are what the README shows |
+| `scripts/render-screenshots.sh` | Converts `design/tui-*.svg` to PNG for `make screenshots` |
 | `docs/HARDWARE-TESTING.md` | Agent-first, read-only playbook for verifying new Scarlett / Clarett / Vocaster hardware and submitting fixture PRs |
 | `Makefile` | `build`, `test`, `lint`, `check-toolchain`, `check-plugin`, `install`, `install-plugin`, `uninstall` |
 
@@ -62,6 +64,13 @@ backend that `Panel.qml` talks to over JSON-lines.
   over any drawing.
 - **Stable Rust only.** `rust-toolchain.toml` and `mise.toml` must name the same
   stable version (`make check-toolchain`).
+- **Screenshots follow the code.** After any change that alters what the TUI
+  draws, run `make screenshots` and commit `design/` in the same pull request.
+  `make test` fails when `design/tui-*.svg` are stale, because a README that
+  shows an old UI misleads users. To show a new state, change the `model_demo`
+  fixture in `src/model.rs` or `demo_app` in `src/ui.rs`, never edit the
+  images. The demo must stay a plausible real device: real control names, no
+  invented features.
 - **Privacy & cleanliness:** Never commit device serial numbers, `/home/<user>`
   paths, or machine hostnames in source, fixtures, or documentation.
 - **Facts vs. unverified claims:** Mark anything not verified on real hardware
@@ -77,6 +86,7 @@ folder):
 | `mise install` | Install the pinned Rust toolchain once |
 | `make test` | Check toolchain pin, check plugin & QML safety, run `cargo test --locked` |
 | `make lint` | `cargo fmt --check`, `cargo clippy -- -D warnings`, `scripts/check-plugin.sh` |
+| `make screenshots` | Re-render the README screenshots from the demo fixture (needs `rsvg-convert` and the JetBrainsMono Nerd Font for the PNGs) |
 | `make build` | Build stripped release binary (`target/release/scarlett-tui`) |
 | `make install` | Install binary to `~/.local/bin/scarlett-tui` and create `Scarlett TUI.desktop` |
 | `make install-plugin` | Run `make install`, symlink repo into `~/.config/omarchy/plugins/io.github.kinggs.scarlett-tui`, and enable |
@@ -88,5 +98,6 @@ folder):
 2. Add or update unit tests in `src/model.rs`, `src/pipewire.rs`, or
    `src/daemon.rs` for any parsing, routing, or model change.
 3. Run `make test` and `make lint` before pushing.
-4. Fill in `.github/PULL_REQUEST_TEMPLATE.md`, noting which hardware model (if
+4. If the TUI changed visibly, run `make screenshots` and commit `design/`.
+5. Fill in `.github/PULL_REQUEST_TEMPLATE.md`, noting which hardware model (if
    any) you verified on and marking anything untested with `⚠`.

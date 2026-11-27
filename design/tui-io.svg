@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="821.99994" height="564">
+<rect width="100%" height="100%" rx="8" fill="#1a1b26"/>
+<g font-family="JetBrainsMono Nerd Font, monospace" font-size="14">
+<text x="12" y="25.5" fill="#9ece6a" font-weight="bold" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ● Locked</text>
+<text x="87.6" y="25.5" fill="#a9b1d6" font-weight="bold" textLength="84" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  48.0 kHz</text>
+<rect x="188.4" y="12" width="42" height="18" fill="#f7768e"/>
+<text x="188.4" y="25.5" fill="#1a1b26" font-weight="bold" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 48V </text>
+<rect x="247.19998" y="12" width="50.399998" height="18" fill="#f7768e"/>
+<text x="247.19998" y="25.5" fill="#1a1b26" font-weight="bold" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> CLIP </text>
+<text x="314.4" y="25.5" fill="#a9b1d6" font-weight="bold" textLength="134.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Scarlett 4i4 USB</text>
+<text x="448.8" y="25.5" fill="#a9b1d6" fill-opacity="0.62" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> · Gen 3</text>
+<text x="767.99994" y="25.5" fill="#a9b1d6" fill-opacity="0.62" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve">PW 0 </text>
+<text x="12" y="43.5" fill="#a9b1d6" fill-opacity="0.62" textLength="134.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 1 Overview  │  </text>
+<text x="146.4" y="43.5" fill="#449dab" font-weight="bold" fill-opacity="0.62" text-decoration="underline" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve">2 I/O</text>
+<text x="188.4" y="43.5" fill="#a9b1d6" fill-opacity="0.62" textLength="621.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  │  3 Device routing  │  4 Matrix  │  5 PipeWire graph                   </text>
+<text x="12" y="61.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">┌</text>
+<text x="20.4" y="61.5" fill="#a9b1d6" textLength="117.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> I/O &amp; Device </text>
+<text x="138" y="61.5" fill="#414868" textLength="672" lengthAdjust="spacingAndGlyphs" xml:space="preserve">───────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="12" y="79.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="79.5" fill="#449dab" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Inputs </text>
+<text x="87.6" y="79.5" fill="#414868" textLength="722.39996" lengthAdjust="spacingAndGlyphs" xml:space="preserve">─────────────────────────────────────────────────────────────────────────────────────│</text>
+<text x="12" y="97.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="97.5" fill="#a9b1d6" font-weight="bold" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Input 1                </text>
+<text x="221.99998" y="97.5" fill="#a9b1d6" fill-opacity="0.62" textLength="100.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Level ○ Line</text>
+<text x="339.59998" y="97.5" fill="#a9b1d6" font-weight="bold" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">● Inst</text>
+<rect x="415.19998" y="84" width="67.2" height="18" fill="#a9b1d6"/>
+<text x="415.19998" y="97.5" fill="#1a1b26" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Air ■ on</text>
+<text x="507.59998" y="97.5" fill="#a9b1d6" fill-opacity="0.62" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Pad □ off</text>
+<text x="801.6" y="97.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="115.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="115.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Input 2                </text>
+<text x="221.99998" y="115.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Level </text>
+<text x="272.4" y="115.5" fill="#a9b1d6" font-weight="bold" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">● Line</text>
+<text x="339.59998" y="115.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">○ Inst</text>
+<text x="415.19998" y="115.5" fill="#a9b1d6" fill-opacity="0.62" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Air □ off</text>
+<text x="516" y="115.5" fill="#a9b1d6" fill-opacity="0.62" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Pad </text>
+<text x="549.6" y="115.5" fill="#9ece6a" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ on</text>
+<text x="801.6" y="115.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="133.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="133.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="151.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="151.5" fill="#449dab" font-weight="bold" textLength="125.99999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Phantom power </text>
+<text x="146.4" y="151.5" fill="#414868" textLength="663.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">──────────────────────────────────────────────────────────────────────────────│</text>
+<text x="12" y="169.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="169.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Line In 1-2            </text>
+<rect x="221.99998" y="156" width="42" height="18" fill="#f7768e"/>
+<text x="221.99998" y="169.5" fill="#1a1b26" font-weight="bold" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> 48V </text>
+<text x="264" y="169.5" fill="#f7768e" font-weight="bold" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> live</text>
+<text x="801.6" y="169.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="187.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="187.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Persistence            </text>
+<text x="221.99998" y="187.5" fill="#9ece6a" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ on</text>
+<text x="801.6" y="187.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="205.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="205.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="223.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="223.5" fill="#449dab" font-weight="bold" textLength="75.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Outputs </text>
+<text x="96" y="223.5" fill="#414868" textLength="713.99994" lengthAdjust="spacingAndGlyphs" xml:space="preserve">────────────────────────────────────────────────────────────────────────────────────│</text>
+<text x="12" y="241.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="241.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Line 01 (Monitor L)    </text>
+<text x="221.99998" y="241.5" fill="#449dab" textLength="168" lengthAdjust="spacingAndGlyphs" xml:space="preserve">████████████████████</text>
+<text x="389.99997" y="241.5" fill="#a9b1d6" font-weight="bold" textLength="84" lengthAdjust="spacingAndGlyphs" xml:space="preserve">   +0.0 dB</text>
+<text x="499.19998" y="241.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">□ mute</text>
+<text x="801.6" y="241.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="259.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="259.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Line 02 (Monitor R)    </text>
+<text x="221.99998" y="259.5" fill="#449dab" textLength="168" lengthAdjust="spacingAndGlyphs" xml:space="preserve">████████████████████</text>
+<text x="389.99997" y="259.5" fill="#a9b1d6" font-weight="bold" textLength="84" lengthAdjust="spacingAndGlyphs" xml:space="preserve">   +0.0 dB</text>
+<text x="499.19998" y="259.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve">□ mute</text>
+<text x="801.6" y="259.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="277.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="277.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Line 03 (Headphones L) </text>
+<text x="221.99998" y="277.5" fill="#414868" textLength="168" lengthAdjust="spacingAndGlyphs" xml:space="preserve">██████████████████░░</text>
+<text x="389.99997" y="277.5" fill="#a9b1d6" fill-opacity="0.62" textLength="84" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  -12.0 dB</text>
+<rect x="499.19998" y="264" width="58.799995" height="18" fill="#f7768e"/>
+<text x="499.19998" y="277.5" fill="#1a1b26" font-weight="bold" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> MUTED </text>
+<text x="801.6" y="277.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="295.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="295.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Line 04 (Headphones R) </text>
+<text x="221.99998" y="295.5" fill="#414868" textLength="168" lengthAdjust="spacingAndGlyphs" xml:space="preserve">██████████████████░░</text>
+<text x="389.99997" y="295.5" fill="#a9b1d6" fill-opacity="0.62" textLength="84" lengthAdjust="spacingAndGlyphs" xml:space="preserve">  -12.0 dB</text>
+<rect x="499.19998" y="282" width="58.799995" height="18" fill="#f7768e"/>
+<text x="499.19998" y="295.5" fill="#1a1b26" font-weight="bold" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> MUTED </text>
+<text x="801.6" y="295.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="313.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="313.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="331.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="331.5" fill="#449dab" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Device </text>
+<text x="87.6" y="331.5" fill="#414868" textLength="722.39996" lengthAdjust="spacingAndGlyphs" xml:space="preserve">─────────────────────────────────────────────────────────────────────────────────────│</text>
+<text x="12" y="349.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="20.4" y="349.5" fill="#a9b1d6" textLength="201.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> Standalone Switch      </text>
+<text x="221.99998" y="349.5" fill="#9ece6a" textLength="33.6" lengthAdjust="spacingAndGlyphs" xml:space="preserve">■ on</text>
+<text x="801.6" y="349.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="367.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="367.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="385.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="385.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="403.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="403.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="421.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="421.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="439.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="439.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="457.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="457.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="475.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="475.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="493.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="801.6" y="493.5" fill="#414868" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">│</text>
+<text x="12" y="511.5" fill="#414868" textLength="797.99994" lengthAdjust="spacingAndGlyphs" xml:space="preserve">└─────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="692.39996" y="529.5" fill="#a9b1d6" fill-opacity="0.62" textLength="117.59999" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Input 1 · Air </text>
+<text x="20.4" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve">h j k l</text>
+<text x="79.2" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> move </text>
+<text x="138" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="25.199999" lengthAdjust="spacingAndGlyphs" xml:space="preserve">- +</text>
+<text x="163.2" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ±1 dB </text>
+<text x="230.4" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="25.199999" lengthAdjust="spacingAndGlyphs" xml:space="preserve">{ }</text>
+<text x="255.59999" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> ±6 dB </text>
+<text x="322.8" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">0</text>
+<text x="331.19998" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="58.799995" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> unity </text>
+<text x="398.4" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">m</text>
+<text x="406.8" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> mute </text>
+<text x="465.59998" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Space</text>
+<text x="507.59998" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="67.2" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> toggle </text>
+<text x="583.19995" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">q</text>
+<text x="591.6" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="50.399998" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> quit </text>
+<text x="650.39996" y="547.5" fill="#a9b1d6" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs" xml:space="preserve">?</text>
+<text x="658.8" y="547.5" fill="#a9b1d6" fill-opacity="0.62" textLength="42" lengthAdjust="spacingAndGlyphs" xml:space="preserve"> help</text>
+</g>
+</svg>
