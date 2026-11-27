@@ -264,7 +264,7 @@ as one "activate", so in the panel Enter also toggles and arms 48V.
   Read-only controls show `⊘`.
 - **Matrix:** the legend (`·` off, unity, boost, unrouted mix) is in the help
   overlay, not on the tab.
-- **Panel:** 400 px wide. Model name on line one; status pills on line two
+- **Panel:** 400 px wide, up to 760 px tall (the shell also stops it at the screen edge; longer content scrolls). Model name on line one; status pills on line two
   (`● Locked · 48 kHz · Gen 3`); firmware in the tooltip. One `TUI` button.
   Sections: INPUTS (meter, then chips, then the 48V row) and OUTPUTS (meter,
   level, `MUTE`, then source). The alert strip is for clips only. The footer
