@@ -566,6 +566,54 @@ impl ScarlettModel {
     pub fn is_locked(&self) -> bool {
         self.sync_status.eq_ignore_ascii_case("Locked")
     }
+
+    /// True for a control that switches 48 V phantom power on inputs, not the
+    /// "Phantom Power Persistence" setting that only remembers it.
+    pub fn is_phantom_switch(&self, numid: u32) -> bool {
+        self.phantom_numids.contains(&numid)
+            && self
+                .controls
+                .get(&numid)
+                .is_some_and(|c| !c.name.contains("Persistence"))
+    }
+
+    /// True while any input has 48 V phantom power on.
+    pub fn phantom_live(&self) -> bool {
+        self.phantom_numids.iter().any(|&id| {
+            self.is_phantom_switch(id)
+                && self
+                    .controls
+                    .get(&id)
+                    .and_then(|c| c.opt_bool_val())
+                    .unwrap_or(false)
+        })
+    }
+}
+
+/// A unity (0 dB) jump larger than this needs a second key press (docs/DESIGN.md).
+pub const UNITY_CONFIRM_RISE_DB: f64 = 6.0;
+
+/// What pressing the unity key should do for a level at `current_db`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnityJump {
+    /// At, below or within +6 dB of unity: write immediately.
+    Instant,
+    /// Ask for a second press. `rise_db` is `None` when the level is silent
+    /// (−∞) or unreadable, so the size of the jump is unknown.
+    Confirm { rise_db: Option<f64> },
+}
+
+/// Decide whether jumping a level to 0 dB needs confirmation. `at_min` is true
+/// when the control sits at its minimum raw value, which the hardware treats as −∞.
+pub fn unity_jump(current_db: Option<f64>, at_min: bool) -> UnityJump {
+    if at_min {
+        return UnityJump::Confirm { rise_db: None };
+    }
+    match current_db {
+        None => UnityJump::Confirm { rise_db: None },
+        Some(db) if -db > UNITY_CONFIRM_RISE_DB => UnityJump::Confirm { rise_db: Some(-db) },
+        Some(_) => UnityJump::Instant,
+    }
 }
 
 fn is_scarlett2_port_ordered(generation: &str) -> bool {
@@ -667,40 +715,7 @@ pub fn meter_to_dbfs(raw: i64) -> f64 {
 mod tests {
     use super::*;
 
-    fn mk_ctrl(numid: u32, name: &str, kind: ControlKind, items: &[&str], val: i64) -> AlsaControl {
-        AlsaControl {
-            numid,
-            name: name.into(),
-            iface: "MIXER".into(),
-            kind,
-            count: 1,
-            min: 0,
-            max: match kind {
-                ControlKind::Bool => 1,
-                ControlKind::Enum => items.len().saturating_sub(1) as i64,
-                ControlKind::Int => 184,
-            },
-            db_min: if kind == ControlKind::Int {
-                Some(-80.0)
-            } else {
-                None
-            },
-            db_max: if kind == ControlKind::Int {
-                Some(12.0)
-            } else {
-                None
-            },
-            current_db_tlv: None,
-            unity_raw: None,
-            tlv_readable: false,
-            items: items.iter().map(|s| s.to_string()).collect(),
-            values: vec![val],
-            readable: true,
-            value_valid: true,
-            metadata_complete: true,
-            rw: true,
-        }
-    }
+    use super::fixtures::mk_ctrl;
 
     #[test]
     fn builds_4i4_gen3_model_dynamically() {
@@ -1017,6 +1032,58 @@ mod tests {
     }
 
     #[test]
+    fn unity_jump_confirms_only_large_rises() {
+        assert_eq!(
+            unity_jump(Some(-40.0), false),
+            UnityJump::Confirm {
+                rise_db: Some(40.0)
+            }
+        );
+        assert_eq!(
+            unity_jump(Some(-6.5), false),
+            UnityJump::Confirm { rise_db: Some(6.5) }
+        );
+        assert_eq!(unity_jump(Some(-6.0), false), UnityJump::Instant);
+        assert_eq!(unity_jump(Some(-1.0), false), UnityJump::Instant);
+        // Downward jumps (gain above unity) are always instant.
+        assert_eq!(unity_jump(Some(12.0), false), UnityJump::Instant);
+        // Silent (minimum = −∞) or unreadable levels always confirm.
+        assert_eq!(
+            unity_jump(Some(-3.0), true),
+            UnityJump::Confirm { rise_db: None }
+        );
+        assert_eq!(
+            unity_jump(None, false),
+            UnityJump::Confirm { rise_db: None }
+        );
+    }
+
+    #[test]
+    fn phantom_live_ignores_persistence_setting() {
+        let mut model = super::fixtures::model_4i4();
+        assert!(model.is_phantom_switch(20));
+        assert!(!model.phantom_live());
+
+        // Persistence on, 48V off: not live, and not a phantom switch.
+        model.controls.insert(
+            21,
+            mk_ctrl(
+                21,
+                "Phantom Power Persistence Capture Switch",
+                ControlKind::Bool,
+                &[],
+                1,
+            ),
+        );
+        model.phantom_numids.push(21);
+        assert!(!model.is_phantom_switch(21));
+        assert!(!model.phantom_live());
+
+        model.controls.get_mut(&20).unwrap().values = vec![1];
+        assert!(model.phantom_live());
+    }
+
+    #[test]
     fn generation_table_covers_kernel_7_2_ids() {
         use crate::alsa_ctl::focusrite_generation;
         assert_eq!(focusrite_generation("1235:8212"), "Gen 3");
@@ -1026,5 +1093,139 @@ mod tests {
         assert_eq!(focusrite_generation("1235:8203"), "Gen 2");
         assert_eq!(focusrite_generation("1235:8217"), "Vocaster");
         assert_eq!(focusrite_generation("1235:820a"), "Clarett+");
+    }
+}
+
+/// Synthetic controls shared by unit tests in this crate (no hardware needed).
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use super::*;
+
+    pub(crate) fn mk_ctrl(
+        numid: u32,
+        name: &str,
+        kind: ControlKind,
+        items: &[&str],
+        val: i64,
+    ) -> AlsaControl {
+        AlsaControl {
+            numid,
+            name: name.into(),
+            iface: "MIXER".into(),
+            kind,
+            count: 1,
+            min: 0,
+            max: match kind {
+                ControlKind::Bool => 1,
+                ControlKind::Enum => items.len().saturating_sub(1) as i64,
+                ControlKind::Int => 184,
+            },
+            db_min: if kind == ControlKind::Int {
+                Some(-80.0)
+            } else {
+                None
+            },
+            db_max: if kind == ControlKind::Int {
+                Some(12.0)
+            } else {
+                None
+            },
+            current_db_tlv: None,
+            unity_raw: None,
+            tlv_readable: false,
+            items: items.iter().map(|s| s.to_string()).collect(),
+            values: vec![val],
+            readable: true,
+            value_valid: true,
+            metadata_complete: true,
+            rw: true,
+        }
+    }
+
+    /// A Scarlett 4i4 Gen 3 shaped model: one input with Inst/Air, 48V off,
+    /// one output with volume and mute, routing, a one-cell matrix, sync and
+    /// a two-slot level meter.
+    pub(crate) fn model_4i4() -> ScarlettModel {
+        let card = CardEntry {
+            index: 1,
+            alsa_id: "USB".into(),
+            name: "Scarlett 4i4 USB".into(),
+            usb_id: "1235:8212".into(),
+            generation: "Gen 3".into(),
+        };
+        let items = &["Off", "Analogue 1", "Analogue 2", "Mix A", "PCM 1", "PCM 2"];
+        let mut meter = mk_ctrl(90, "Level Meter", ControlKind::Int, &[], 0);
+        meter.count = 2;
+        meter.max = 4095;
+        meter.values = vec![0, 0];
+        meter.rw = false;
+        let list = vec![
+            mk_ctrl(
+                1,
+                "Line In 1 Gain Capture Volume",
+                ControlKind::Int,
+                &[],
+                40,
+            ),
+            mk_ctrl(
+                6,
+                "Line 01 (Monitor L) Playback Volume",
+                ControlKind::Int,
+                &[],
+                127,
+            ),
+            mk_ctrl(7, "Line 01 Mute Playback Switch", ControlKind::Bool, &[], 0),
+            mk_ctrl(
+                14,
+                "Line In 1 Level Capture Enum",
+                ControlKind::Enum,
+                &["Line", "Inst"],
+                0,
+            ),
+            mk_ctrl(
+                18,
+                "Line In 1 Air Capture Switch",
+                ControlKind::Bool,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                20,
+                "Line In 1-2 Phantom Power Capture Switch",
+                ControlKind::Bool,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                22,
+                "Analogue Output 01 Playback Enum",
+                ControlKind::Enum,
+                items,
+                0,
+            ),
+            mk_ctrl(
+                26,
+                "Mixer Input 01 Capture Enum",
+                ControlKind::Enum,
+                items,
+                4,
+            ),
+            mk_ctrl(
+                40,
+                "Mix A Input 01 Playback Volume",
+                ControlKind::Int,
+                &[],
+                0,
+            ),
+            mk_ctrl(
+                89,
+                "Sync Status",
+                ControlKind::Enum,
+                &["Unlocked", "Locked"],
+                1,
+            ),
+            meter,
+        ];
+        ScarlettModel::build(card, StreamRateInfo::default(), list)
     }
 }

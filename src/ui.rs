@@ -1,7 +1,7 @@
 use crate::alsa_ctl::{
-    AlsaCard, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
+    AlsaCard, AlsaControl, CardEntry, ControlKind, discover_focusrite_cards, read_stream_rate,
 };
-use crate::model::{RouteGroup, ScarlettModel, meter_to_dbfs_with_max};
+use crate::model::{RouteGroup, ScarlettModel, UnityJump, meter_to_dbfs_with_max, unity_jump};
 use crate::pipewire::{self, PwLink};
 use crossterm::{
     cursor::Show,
@@ -67,6 +67,65 @@ struct RoutePicker {
     selected: usize,
 }
 
+/// A safety action waiting for its confirming key press (docs/DESIGN.md).
+#[derive(Clone, Debug, PartialEq)]
+enum ArmedAction {
+    /// Jump a level to 0 dB; confirmed by pressing `0` again within 2 s.
+    Unity {
+        numid: u32,
+        raw: i64,
+        label: String,
+        rise_db: Option<f64>,
+    },
+    /// Enable 48 V phantom power; confirmed by Space or Enter within 3 s.
+    Phantom { numid: u32, label: String },
+}
+
+impl ArmedAction {
+    fn window(&self) -> Duration {
+        match self {
+            ArmedAction::Unity { .. } => Duration::from_secs(2),
+            ArmedAction::Phantom { .. } => Duration::from_secs(3),
+        }
+    }
+
+    fn confirmed_by(&self, code: KeyCode) -> bool {
+        match self {
+            ArmedAction::Unity { .. } => code == KeyCode::Char('0'),
+            ArmedAction::Phantom { .. } => matches!(code, KeyCode::Char(' ') | KeyCode::Enter),
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self {
+            ArmedAction::Unity {
+                label,
+                rise_db: Some(rise),
+                ..
+            } => format!("Press 0 again: +{rise:.0} dB to 0.0 dB on {label}"),
+            ArmedAction::Unity { label, .. } => {
+                format!("Press 0 again: −∞ to 0.0 dB on {label}")
+            }
+            ArmedAction::Phantom { label, .. } => {
+                format!("48V for {label}. Check connected mics, then Space to enable.")
+            }
+        }
+    }
+
+    fn confirm_hint(&self) -> &'static str {
+        match self {
+            ArmedAction::Unity { .. } => " 0 confirm · Esc cancel",
+            ArmedAction::Phantom { .. } => " Space confirm · Esc cancel",
+        }
+    }
+}
+
+struct Armed {
+    action: ArmedAction,
+    at: Instant,
+    generation: u64,
+}
+
 /// RAII guard that restores raw mode, alternate screen, and cursor even on panic.
 struct TerminalGuard;
 
@@ -96,6 +155,7 @@ pub struct App {
     io_cursor: usize,
     route_cursor: usize,
     route_picker: Option<RoutePicker>,
+    armed: Option<Armed>,
     matrix_row: usize,
     matrix_col: usize,
     matrix_prev_levels: HashMap<(char, u32), i64>,
@@ -131,6 +191,7 @@ impl App {
             io_cursor: 0,
             route_cursor: 0,
             route_picker: None,
+            armed: None,
             matrix_row: 0,
             matrix_col: 0,
             matrix_prev_levels: HashMap::new(),
@@ -148,6 +209,39 @@ impl App {
         app
     }
 
+    /// An app with no ALSA handle, no card scan and no `pw-link` call, for render tests.
+    #[cfg(test)]
+    fn for_test(model: Option<ScarlettModel>) -> Self {
+        let n = model.as_ref().map_or(0, |m| m.meter_channels.len());
+        Self {
+            cards: Vec::new(),
+            card_override: None,
+            current_card_index: model.as_ref().map(|m| m.card.index),
+            generation: 1,
+            alsa: None,
+            model,
+            tab: Tab::Overview,
+            meter_raw: vec![0; n],
+            meter_peak: vec![-96.0; n],
+            meter_peak_time: vec![Instant::now(); n],
+            io_cursor: 0,
+            route_cursor: 0,
+            route_picker: None,
+            armed: None,
+            matrix_row: 0,
+            matrix_col: 0,
+            matrix_prev_levels: HashMap::new(),
+            pw_links: Vec::new(),
+            pw_show_all: false,
+            pw_cursor: 0,
+            status_msg: String::new(),
+            status_at: Instant::now(),
+            last_rate_check: Instant::now(),
+            last_poll_fallback: Instant::now(),
+            should_quit: false,
+        }
+    }
+
     fn set_status(&mut self, msg: impl Into<String>) {
         self.status_msg = msg.into();
         self.status_at = Instant::now();
@@ -157,6 +251,7 @@ impl App {
     /// switching to a smaller interface can never index out of bounds.
     fn clamp_cursors(&mut self) {
         self.route_picker = None;
+        self.armed = None;
         let io_len = self.io_items().len();
         self.io_cursor = if io_len == 0 {
             0
@@ -402,6 +497,70 @@ impl App {
         items
     }
 
+    fn arm(&mut self, action: ArmedAction) {
+        self.armed = Some(Armed {
+            action,
+            at: Instant::now(),
+            generation: self.generation,
+        });
+    }
+
+    fn fire_armed(&mut self, action: ArmedAction) {
+        match action {
+            ArmedAction::Unity {
+                numid, raw, label, ..
+            } => {
+                if self.write_control(numid, raw) {
+                    self.set_status(format!("{label} → 0.0 dB"));
+                }
+            }
+            ArmedAction::Phantom { numid, label } => {
+                if self.write_control(numid, 1) {
+                    self.set_status(format!("48V on: {label}"));
+                }
+            }
+        }
+    }
+
+    /// Drop an armed action whose confirm window has passed.
+    fn expire_armed(&mut self, now: Instant) {
+        let expired = self
+            .armed
+            .as_ref()
+            .filter(|a| now.duration_since(a.at) >= a.action.window())
+            .map(|a| match a.action {
+                ArmedAction::Phantom { .. } => "48V not enabled (timed out)",
+                ArmedAction::Unity { .. } => "Unity not applied (timed out)",
+            });
+        if let Some(msg) = expired {
+            self.armed = None;
+            self.set_status(msg);
+        }
+    }
+
+    /// Set `ctrl` to `unity`, or arm a confirm when that is a rise of more than +6 dB.
+    fn unity_or_arm(&mut self, ctrl: &AlsaControl, unity: i64, label: String) {
+        let cur = ctrl.opt_val();
+        let jump = if cur.is_some_and(|v| v >= unity) {
+            UnityJump::Instant
+        } else {
+            unity_jump(ctrl.current_db(), cur.is_some_and(|v| v <= ctrl.min))
+        };
+        match jump {
+            UnityJump::Instant => {
+                if self.write_control(ctrl.numid, unity) {
+                    self.set_status(format!("{label} → 0.0 dB"));
+                }
+            }
+            UnityJump::Confirm { rise_db } => self.arm(ArmedAction::Unity {
+                numid: ctrl.numid,
+                raw: unity,
+                label,
+                rise_db,
+            }),
+        }
+    }
+
     fn write_control(&mut self, numid: u32, new_val: i64) -> bool {
         let Some(ref alsa) = self.alsa else {
             return false;
@@ -430,6 +589,8 @@ impl App {
     }
 
     fn tick(&mut self) {
+        self.expire_armed(Instant::now());
+
         // Drain hardware events (physical button presses / plugin changes / access changes)
         let mut disconnected = false;
         let mut structural_rebuild = false;
@@ -549,6 +710,21 @@ impl App {
         if code == KeyCode::Char('c') && mods.contains(KeyModifiers::CONTROL) {
             self.should_quit = true;
             return;
+        }
+
+        // An armed safety action consumes its confirm key; Esc cancels it, and any
+        // other key cancels it and is then handled normally.
+        if let Some(armed) = self.armed.take() {
+            let live =
+                armed.generation == self.generation && armed.at.elapsed() < armed.action.window();
+            if live && armed.action.confirmed_by(code) {
+                self.fire_armed(armed.action);
+                return;
+            }
+            if code == KeyCode::Esc {
+                self.set_status("Cancelled");
+                return;
+            }
         }
 
         // Route picker modal intercepts keys
@@ -683,6 +859,10 @@ impl App {
         else {
             return;
         };
+        let is_phantom = self
+            .model
+            .as_ref()
+            .is_some_and(|m| m.is_phantom_switch(item.numid));
 
         match code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -701,7 +881,15 @@ impl App {
                 match ctrl.kind {
                     ControlKind::Bool => {
                         if let Some(b) = ctrl.opt_bool_val() {
-                            self.write_control(ctrl.numid, if b { 0 } else { 1 });
+                            if !b && is_phantom {
+                                // 48V takes two steps to enable, one to disable.
+                                self.arm(ArmedAction::Phantom {
+                                    numid: ctrl.numid,
+                                    label: item.label.clone(),
+                                });
+                            } else {
+                                self.write_control(ctrl.numid, if b { 0 } else { 1 });
+                            }
                         }
                     }
                     ControlKind::Enum => {
@@ -724,6 +912,14 @@ impl App {
                     return;
                 }
                 match ctrl.kind {
+                    ControlKind::Bool if is_phantom => {
+                        if ctrl.opt_bool_val() == Some(false) {
+                            self.arm(ArmedAction::Phantom {
+                                numid: ctrl.numid,
+                                label: item.label.clone(),
+                            });
+                        }
+                    }
                     ControlKind::Bool => {
                         self.write_control(ctrl.numid, 1);
                     }
@@ -784,9 +980,7 @@ impl App {
                     .as_ref()
                     .and_then(|m| m.unity_raw_for(ctrl.numid))
                 {
-                    if self.write_control(ctrl.numid, unity) {
-                        self.set_status(format!("{} → 0.0 dB", item.label));
-                    }
+                    self.unity_or_arm(&ctrl, unity, item.label.clone());
                 } else {
                     self.set_status(format!("No 0 dB reference for {}", item.label));
                 }
@@ -945,11 +1139,9 @@ impl App {
                 }
             }
             KeyCode::Char('0') => {
-                if let Some(id) = cell_id {
+                if let Some(ref c) = cell_ctrl {
                     if let Some(unity) = unity_opt {
-                        if self.write_control(id, unity) {
-                            self.set_status(format!("Mix {mix} In {input:02} → 0.0 dB"));
-                        }
+                        self.unity_or_arm(c, unity, format!("Mix {mix} In {input:02}"));
                     } else {
                         self.set_status(format!("No 0 dB reference for Mix {mix} In {input:02}"));
                     }
@@ -966,7 +1158,7 @@ impl App {
                     } else if let Some(prev) = self.matrix_prev_levels.get(&(mix, input)).copied() {
                         self.write_control(c.numid, prev.clamp(c.min, c.max));
                     } else if let Some(unity) = unity_opt {
-                        self.write_control(c.numid, unity);
+                        self.unity_or_arm(c, unity, format!("Mix {mix} In {input:02}"));
                     } else {
                         self.set_status(format!(
                             "No previous level or 0 dB reference for Mix {mix} In {input:02}"
@@ -1069,7 +1261,12 @@ impl App {
                 .map(|v| format!("FW {v}"))
                 .unwrap_or_else(|| "FW ?".into());
             let pw_count = self.pw_links.iter().filter(|l| l.is_scarlett).count();
-            Line::from(vec![
+            let mut spans = Vec::new();
+            if m.phantom_live() {
+                spans.push(Span::styled(" 48V ", badge(Color::Red)));
+                spans.push(Span::raw(" "));
+            }
+            spans.extend([
                 Span::styled(
                     format!(" {} ", m.card.name),
                     Style::default().add_modifier(Modifier::BOLD),
@@ -1078,11 +1275,8 @@ impl App {
                     format!("({})  ", m.card.generation),
                     Style::default().fg(Color::Cyan),
                 ),
-                Span::styled(
-                    format!("USB {}  ", m.card.usb_id),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(format!("{fw}  "), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("USB {}  ", m.card.usb_id), secondary()),
+                Span::styled(format!("{fw}  "), secondary()),
                 Span::styled(
                     format!("● {sync_label}  "),
                     Style::default().fg(sync_color).add_modifier(Modifier::BOLD),
@@ -1090,13 +1284,14 @@ impl App {
                 Span::styled(format!("{rate_str}  "), Style::default().fg(Color::Cyan)),
                 Span::styled(
                     format!("PW links: {pw_count}"),
-                    Style::default().fg(if pw_count > 0 {
-                        Color::Yellow
+                    if pw_count > 0 {
+                        Style::default().fg(Color::Yellow)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ),
-            ])
+            ]);
+            Line::from(spans)
         } else if let Some(req) = self.card_override {
             Line::from(Span::styled(
                 format!(" Focusrite card {req} not connected (press r to rescan)"),
@@ -1113,7 +1308,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" scarlett-tui ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(header, area);
     }
@@ -1122,7 +1318,7 @@ impl App {
         let titles: Vec<Line> = Tab::ALL.iter().map(|t| Line::from(t.title())).collect();
         let tabs = Tabs::new(titles)
             .select(self.tab as usize)
-            .style(Style::default().fg(Color::DarkGray))
+            .style(secondary())
             .highlight_style(
                 Style::default()
                     .fg(Color::Cyan)
@@ -1223,16 +1419,16 @@ impl App {
             meter_lines.push(Line::from(vec![
                 Span::raw(format!(" {label:<22} ")),
                 Span::styled("█".repeat(filled), Style::default().fg(bar_color)),
-                Span::styled("░".repeat(empty), Style::default().fg(Color::DarkGray)),
+                Span::styled("░".repeat(empty), decoration()),
                 Span::raw(format!(" {db_text}")),
-                Span::styled(peak_tag, Style::default().fg(Color::DarkGray)),
+                Span::styled(peak_tag, secondary()),
             ]));
         }
 
         if meter_lines.is_empty() {
             meter_lines.push(Line::from(Span::styled(
                 " No hardware level meter exposed by this model.",
-                Style::default().fg(Color::DarkGray),
+                secondary(),
             )));
         }
 
@@ -1240,7 +1436,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Live Hardware Meters (ALSA) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(meter_panel, cols[0]);
 
@@ -1260,11 +1457,11 @@ impl App {
                 let lbl = c.enum_label();
                 badges.push(Span::styled(
                     format!("[{lbl}]"),
-                    Style::default().fg(if lbl == "Inst" {
-                        Color::Yellow
+                    if lbl == "Inst" {
+                        Style::default().fg(Color::Yellow)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.air_numid
@@ -1279,7 +1476,11 @@ impl App {
                 badges.push(Span::raw(" "));
                 badges.push(Span::styled(
                     txt,
-                    Style::default().fg(if on { Color::Yellow } else { Color::DarkGray }),
+                    if on {
+                        Style::default().fg(Color::Yellow)
+                    } else {
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.pad_numid
@@ -1288,11 +1489,11 @@ impl App {
                 badges.push(Span::raw(" "));
                 badges.push(Span::styled(
                     "[Pad]",
-                    Style::default().fg(if c.bool_val() {
-                        Color::Cyan
+                    if c.bool_val() {
+                        Style::default().fg(Color::Cyan)
                     } else {
-                        Color::DarkGray
-                    }),
+                        secondary()
+                    },
                 ));
             }
             if let Some(id) = inp.gain_numid
@@ -1316,11 +1517,9 @@ impl App {
             if let Some(c) = m.controls.get(&pid) {
                 let short = c.name.replace(" Capture Switch", "");
                 let (txt, style) = match c.opt_bool_val() {
-                    Some(true) => (
-                        "ON",
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    ),
-                    Some(false) => ("OFF", Style::default().fg(Color::DarkGray)),
+                    Some(true) if m.is_phantom_switch(pid) => (" 48V ", badge(Color::Red)),
+                    Some(true) => ("ON", Style::default().fg(Color::Green)),
+                    Some(false) => ("OFF", secondary()),
                     None => ("?", Style::default().fg(Color::Yellow)),
                 };
                 info_lines.push(Line::from(vec![
@@ -1366,7 +1565,7 @@ impl App {
             info_lines.push(Line::from(vec![
                 Span::raw(format!("  {:<21} ", truncate(&r.label, 21))),
                 Span::styled(r.summary.clone(), Style::default().fg(Color::Green)),
-                Span::styled(out_extra, Style::default().fg(Color::DarkGray)),
+                Span::styled(out_extra, secondary()),
             ]));
         }
 
@@ -1398,7 +1597,7 @@ impl App {
                         pipewire::short_port(&l.output_port),
                         pipewire::short_port(&l.input_port)
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary(),
                 )));
             }
         }
@@ -1407,7 +1606,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Status & Signal Path ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(info_panel, cols[1]);
     }
@@ -1436,18 +1636,11 @@ impl App {
             .map(|(local_i, item)| {
                 let i = row_start + local_i;
                 let c = &m.controls[&item.numid];
-                let (mut val_str, val_color) = match c.kind {
+                let (mut val_str, val_style) = match c.kind {
                     ControlKind::Bool => match c.opt_bool_val() {
-                        Some(true) => (
-                            "ON".into(),
-                            if item.label.contains("Phantom") || item.label.contains("Mute") {
-                                Color::Red
-                            } else {
-                                Color::Green
-                            },
-                        ),
-                        Some(false) => ("OFF".into(), Color::DarkGray),
-                        None => ("?".into(), Color::Yellow),
+                        Some(true) => ("ON".into(), Style::default().fg(Color::Green)),
+                        Some(false) => ("OFF".into(), secondary()),
+                        None => ("?".into(), Style::default().fg(Color::Yellow)),
                     },
                     ControlKind::Enum => {
                         let lbl = c.enum_label().to_string();
@@ -1456,7 +1649,7 @@ impl App {
                         } else {
                             Color::Reset
                         };
-                        (lbl, col)
+                        (lbl, Style::default().fg(col))
                     }
                     ControlKind::Int => match c.opt_val() {
                         Some(v) => {
@@ -1471,9 +1664,9 @@ impl App {
                                 .current_db()
                                 .map(|db| format!("{meter} {db:+6.1} dB"))
                                 .unwrap_or_else(|| format!("{meter} {v}"));
-                            (txt, Color::Cyan)
+                            (txt, Style::default().fg(Color::Cyan))
                         }
-                        None => ("?".into(), Color::Yellow),
+                        None => ("?".into(), Style::default().fg(Color::Yellow)),
                     },
                 };
                 if !c.is_editable() {
@@ -1484,10 +1677,33 @@ impl App {
                 } else {
                     Style::default()
                 };
+                let armed_here = matches!(
+                    self.armed.as_ref().map(|a| &a.action),
+                    Some(ArmedAction::Phantom { numid, .. }) if *numid == item.numid
+                );
+                let on = c.opt_bool_val() == Some(true);
+                let value_cell = if armed_here {
+                    Cell::from(Line::from(vec![
+                        Span::styled(" ARM 48V? ", badge(Color::Yellow)),
+                        Span::styled(" Space again within 3 s · Esc cancels", secondary()),
+                    ]))
+                } else if on && m.is_phantom_switch(item.numid) {
+                    Cell::from(Line::from(vec![
+                        Span::styled(" 48V ", badge(Color::Red)),
+                        Span::styled(
+                            " live",
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                        ),
+                    ]))
+                } else if on && item.label.ends_with(" Mute") {
+                    Cell::from(Span::styled(" MUTED ", badge(Color::Red)))
+                } else {
+                    Cell::from(val_str).style(val_style)
+                };
                 Row::new(vec![
-                    Cell::from(item.section).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(item.section).style(secondary()),
                     Cell::from(item.label.clone()),
-                    Cell::from(val_str).style(Style::default().fg(val_color)),
+                    value_cell,
                 ])
                 .style(style)
             })
@@ -1509,7 +1725,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Inputs, Outputs & Device Switches (Space toggle · h/l adjust · 0 unity · m min) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1539,20 +1756,19 @@ impl App {
                 } else {
                     Style::default()
                 };
-                let src_color = if r.current == "Off" {
-                    Color::DarkGray
+                let src_style = if r.current == "Off" {
+                    secondary()
                 } else if r.current.starts_with("Mix ") {
-                    Color::Yellow
+                    Style::default().fg(Color::Yellow)
                 } else if r.current.starts_with("PCM ") {
-                    Color::Green
+                    Style::default().fg(Color::Green)
                 } else {
-                    Color::Cyan
+                    Style::default().fg(Color::Cyan)
                 };
                 Row::new(vec![
-                    Cell::from(r.group.title()).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(r.group.title()).style(secondary()),
                     Cell::from(r.label.clone()),
-                    Cell::from(r.current.clone())
-                        .style(Style::default().fg(src_color).add_modifier(Modifier::BOLD)),
+                    Cell::from(r.current.clone()).style(src_style.add_modifier(Modifier::BOLD)),
                     Cell::from(r.summary.clone()),
                 ])
                 .style(style)
@@ -1579,7 +1795,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(" Hardware Routing Matrix (Enter pick source · h/l cycle · x Off) ")
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1637,14 +1854,11 @@ impl App {
                 let r_idx = row_start + local_r;
                 let src = m.mixer_input_source(in_idx);
                 let row_label = format!("In {in_idx:02} [{src}]");
-                let mut cells =
-                    vec![
-                        Cell::from(row_label).style(Style::default().fg(if src == "Off" {
-                            Color::DarkGray
-                        } else {
-                            Color::Reset
-                        })),
-                    ];
+                let mut cells = vec![Cell::from(row_label).style(if src == "Off" {
+                    secondary()
+                } else {
+                    Style::default()
+                })];
 
                 for (local_c, &mix) in shown_mixes.iter().enumerate() {
                     let c_idx = col_start + local_c;
@@ -1654,9 +1868,7 @@ impl App {
                     {
                         match c.opt_val() {
                             None => ("  ?   ".into(), Style::default().fg(Color::Yellow)),
-                            Some(v) if v <= c.min => {
-                                ("  -∞  ".into(), Style::default().fg(Color::DarkGray))
-                            }
+                            Some(v) if v <= c.min => ("  -∞  ".into(), secondary()),
                             Some(v) => {
                                 if let Some(db) = c.current_db() {
                                     let col = if db > 0.25 {
@@ -1673,7 +1885,7 @@ impl App {
                             }
                         }
                     } else {
-                        ("  —   ".into(), Style::default().fg(Color::DarkGray))
+                        ("  —   ".into(), secondary())
                     };
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1695,7 +1907,8 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Mix Matrix (dB · * = routed to output · +/- ±1dB · {/} ±6dB · 0 unity · m/Space mute) ")
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(decoration())
+                .title_style(title_style()),
             );
         f.render_widget(table, area);
     }
@@ -1715,7 +1928,8 @@ impl App {
                         Block::default()
                             .borders(Borders::ALL)
                             .title(title)
-                            .border_style(Style::default().fg(Color::DarkGray)),
+                            .border_style(decoration())
+                            .title_style(title_style()),
                     );
             f.render_widget(p, area);
             return;
@@ -1747,14 +1961,14 @@ impl App {
                     "other"
                 };
                 Row::new(vec![
-                    Cell::from(format!("#{}", l.id)).style(Style::default().fg(Color::DarkGray)),
+                    Cell::from(format!("#{}", l.id)).style(secondary()),
                     Cell::from(tag).style(Style::default().fg(if is_loopback {
                         Color::Yellow
                     } else {
                         Color::Cyan
                     })),
                     Cell::from(pipewire::short_port(&l.output_port)),
-                    Cell::from("→").style(Style::default().fg(Color::DarkGray)),
+                    Cell::from("→").style(secondary()),
                     Cell::from(pipewire::short_port(&l.input_port)),
                 ])
                 .style(style)
@@ -1782,7 +1996,8 @@ impl App {
             Block::default()
                 .borders(Borders::ALL)
                 .title(title)
-                .border_style(Style::default().fg(Color::DarkGray)),
+                .border_style(decoration())
+                .title_style(title_style()),
         );
         f.render_widget(table, area);
     }
@@ -1817,6 +2032,17 @@ impl App {
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
+        if let Some(ref a) = self.armed {
+            let left = a.action.window().saturating_sub(a.at.elapsed());
+            let prompt = Line::from(vec![
+                Span::styled(" ARMED ", badge(Color::Yellow)),
+                Span::raw(format!(" {} ", a.action.prompt())),
+                Span::styled(format!("{:.1} s", left.as_secs_f32()), secondary()),
+            ]);
+            let hint = Line::from(Span::styled(a.action.confirm_hint(), secondary()));
+            f.render_widget(Paragraph::new(vec![prompt, hint]), area);
+            return;
+        }
         let msg =
             if !self.status_msg.is_empty() && self.status_at.elapsed() < Duration::from_secs(5) {
                 Span::styled(
@@ -1833,11 +2059,36 @@ impl App {
                     format!(
                         " 1-5 / Tab switch view · hjkl/arrows navigate · r refresh{multi} · q quit "
                     ),
-                    Style::default().fg(Color::DarkGray),
+                    secondary(),
                 )
             };
         f.render_widget(Paragraph::new(Line::from(msg)), area);
     }
+}
+
+/// Secondary text: default foreground, dimmed. Never DarkGray, which Omarchy
+/// maps to the theme's `muted` at 1.9:1 contrast (docs/DESIGN.md rule 1).
+fn secondary() -> Style {
+    Style::default().add_modifier(Modifier::DIM)
+}
+
+/// Decoration only: borders, the empty meter track and `·` (docs/DESIGN.md rule 2).
+/// Never use this for words a user must read.
+fn decoration() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+/// Alert badge: reversed colour so the word survives light themes (docs/DESIGN.md rule 3).
+fn badge(color: Color) -> Style {
+    Style::default()
+        .fg(color)
+        .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+/// Block titles are readable text: default foreground, so they do not inherit
+/// the DarkGray border colour.
+fn title_style() -> Style {
+    Style::default().fg(Color::Reset)
 }
 
 fn window_start(cursor: usize, total: usize, visible: usize) -> usize {
@@ -1894,6 +2145,195 @@ pub fn run_tui(card_override: Option<u32>) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::model::fixtures::model_4i4;
+    use ratatui::{backend::TestBackend, buffer::Buffer};
+
+    /// Render one frame of `app` into a `w`×`h` buffer.
+    pub(super) fn render_to_buffer(app: &App, w: u16, h: u16) -> Buffer {
+        let mut term = Terminal::new(TestBackend::new(w, h)).expect("test backend");
+        term.draw(|f| app.render(f)).expect("draw");
+        term.backend().buffer().clone()
+    }
+
+    /// Glyphs DarkGray may draw: box-drawing borders, the empty meter track and `·`.
+    fn is_decoration(sym: &str) -> bool {
+        sym.chars()
+            .all(|c| c == ' ' || c == '░' || c == '·' || ('\u{2500}'..='\u{257F}').contains(&c))
+    }
+
+    #[test]
+    fn darkgray_never_draws_readable_text() {
+        let sizes = [(95, 30), (160, 36), (80, 24)];
+        for model in [Some(model_4i4()), None] {
+            let mut app = App::for_test(model);
+            app.status_msg.clear();
+            for tab in Tab::ALL {
+                app.tab = tab;
+                for (w, h) in sizes {
+                    let buf = render_to_buffer(&app, w, h);
+                    for cell in buf.content() {
+                        if cell.fg == Color::DarkGray {
+                            assert!(
+                                is_decoration(cell.symbol()),
+                                "DarkGray text {:?} on tab {} at {w}x{h}",
+                                cell.symbol(),
+                                tab.title()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn footer_hints_are_dim_default_foreground() {
+        let app = App::for_test(Some(model_4i4()));
+        let buf = render_to_buffer(&app, 95, 30);
+        let y = 28;
+        let row: String = (0..95).map(|x| buf[(x, y)].symbol().to_string()).collect();
+        assert!(row.contains("q quit"), "footer row was {row:?}");
+        let x = row.find('q').unwrap() as u16;
+        let cell = &buf[(x, y)];
+        assert_eq!(cell.fg, Color::Reset);
+        assert!(cell.modifier.contains(Modifier::DIM));
+    }
+
+    fn row_text(buf: &Buffer, y: u16) -> String {
+        (0..buf.area.width)
+            .map(|x| buf[(x, y)].symbol().to_string())
+            .collect()
+    }
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.handle_key(code, KeyModifiers::NONE);
+    }
+
+    fn armed_action(app: &App) -> Option<&ArmedAction> {
+        app.armed.as_ref().map(|a| &a.action)
+    }
+
+    fn io_app_on_phantom() -> App {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::IoDevice;
+        app.io_cursor = app
+            .io_items()
+            .iter()
+            .position(|i| i.section == "Phantom Power")
+            .expect("fixture has a phantom row");
+        app
+    }
+
+    #[test]
+    fn phantom_enable_needs_two_presses_and_esc_cancels() {
+        let mut app = io_app_on_phantom();
+        press(&mut app, KeyCode::Char(' '));
+        assert!(matches!(
+            armed_action(&app),
+            Some(ArmedAction::Phantom { numid: 20, .. })
+        ));
+        // The first press never writes.
+        let ctrl = &app.model.as_ref().unwrap().controls[&20];
+        assert_eq!(ctrl.opt_bool_val(), Some(false));
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(row_text(&buf, 28).contains("ARMED"));
+        assert!(row_text(&buf, 29).contains("Space confirm"));
+
+        press(&mut app, KeyCode::Esc);
+        assert!(app.armed.is_none());
+
+        // Moving away cancels too.
+        press(&mut app, KeyCode::Char('l'));
+        assert!(app.armed.is_some(), "l arms like Space");
+        press(&mut app, KeyCode::Char('k'));
+        assert!(app.armed.is_none());
+
+        // A second Space inside the window consumes the arm (and writes, given ALSA).
+        app.io_cursor += 1;
+        press(&mut app, KeyCode::Char(' '));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_none());
+    }
+
+    #[test]
+    fn phantom_arm_times_out_after_three_seconds() {
+        let mut app = io_app_on_phantom();
+        press(&mut app, KeyCode::Enter);
+        app.expire_armed(Instant::now() + Duration::from_millis(2500));
+        assert!(app.armed.is_some(), "still armed inside 3 s");
+        app.expire_armed(Instant::now() + Duration::from_secs(3));
+        assert!(app.armed.is_none());
+        assert!(app.status_msg.contains("timed out"));
+    }
+
+    #[test]
+    fn phantom_disable_is_one_step() {
+        let mut app = io_app_on_phantom();
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&20)
+            .unwrap()
+            .values = vec![1];
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_none(), "turning 48V off must not arm");
+    }
+
+    #[test]
+    fn unity_from_silence_needs_a_second_press() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        press(&mut app, KeyCode::Char('0'));
+        assert!(matches!(
+            armed_action(&app),
+            Some(ArmedAction::Unity {
+                numid: 40,
+                rise_db: None,
+                ..
+            })
+        ));
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(row_text(&buf, 28).contains("Press 0 again: −∞ to 0.0 dB"));
+        press(&mut app, KeyCode::Char('0'));
+        assert!(app.armed.is_none());
+    }
+
+    #[test]
+    fn unity_on_low_gain_states_the_jump() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::IoDevice;
+        app.io_cursor = 0; // Input 1 Gain, raw 40 = −60 dB in the fixture
+        press(&mut app, KeyCode::Char('0'));
+        match armed_action(&app) {
+            Some(ArmedAction::Unity {
+                rise_db: Some(r), ..
+            }) => assert!((*r - 60.0).abs() < 0.5),
+            other => panic!("expected a unity confirm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn header_shows_48v_badge_only_while_live() {
+        let mut app = App::for_test(Some(model_4i4()));
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(!row_text(&buf, 1).contains("48V"));
+
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&20)
+            .unwrap()
+            .values = vec![1];
+        let buf = render_to_buffer(&app, 95, 30);
+        let row = row_text(&buf, 1);
+        let x = row.find("48V").expect("header badge") as u16;
+        let cell = &buf[(x, 1)];
+        assert_eq!(cell.fg, Color::Red);
+        assert!(cell.modifier.contains(Modifier::REVERSED));
+    }
 
     #[test]
     fn window_start_never_exceeds_bounds_after_shrink() {
