@@ -18,7 +18,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{
         Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, Tabs,
     },
@@ -1904,41 +1904,79 @@ impl App {
             return;
         }
 
-        let cur_row = self.matrix_row.min(m.matrix.inputs.len() - 1);
-        let cur_col = self.matrix_col.min(m.matrix.mixes.len() - 1);
-        let visible_rows = area.height.saturating_sub(4).max(1) as usize;
-        let visible_cols = (area.width.saturating_sub(24).max(9) as usize / 9).max(1);
-        let row_start = window_start(cur_row, m.matrix.inputs.len(), visible_rows);
-        let col_start = window_start(cur_col, m.matrix.mixes.len(), visible_cols);
-        let row_end = (row_start + visible_rows).min(m.matrix.inputs.len());
-        let col_end = (col_start + visible_cols).min(m.matrix.mixes.len());
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Mix matrix ")
+            .border_style(decoration())
+            .title_style(title_style());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),    // table (2 header rows + cells)
+                Constraint::Length(1), // ↓ N more
+                Constraint::Length(1), // legend
+            ])
+            .split(inner);
+
+        let n_rows = m.matrix.inputs.len();
+        let n_cols = m.matrix.mixes.len();
+        let cur_row = self.matrix_row.min(n_rows - 1);
+        let cur_col = self.matrix_col.min(n_cols - 1);
+        let visible_rows = parts[0].height.saturating_sub(2).max(1) as usize;
+        let visible_cols =
+            (parts[0].width.saturating_sub(MATRIX_LABEL_W + 5) / MATRIX_COL_W).max(1) as usize;
+        let row_start = window_start(cur_row, n_rows, visible_rows);
+        let col_start = window_start(cur_col, n_cols, visible_cols);
+        let row_end = (row_start + visible_rows).min(n_rows);
+        let col_end = (col_start + visible_cols).min(n_cols);
         let shown_mixes = &m.matrix.mixes[col_start..col_end];
         let shown_inputs = &m.matrix.inputs[row_start..row_end];
+        let hidden_left = col_start;
+        let hidden_right = n_cols - col_end;
+        let cyan_bold = Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
 
-        let mut header_cells = vec![
-            Cell::from("Mixer Input [Source]").style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
-        for &mix in shown_mixes {
-            let used = m
-                .routes
-                .iter()
-                .any(|r| r.group == RouteGroup::AnalogueOut && r.current == format!("Mix {mix}"));
-            let label = if used {
-                format!("Mix {mix}*")
+        // Header: mix letters, then the output each mix feeds (crosshair in cyan).
+        let corner_top = if hidden_left > 0 {
+            format!(" mixer input  ◂ {hidden_left}")
+        } else {
+            " mixer input  →  mix".to_string()
+        };
+        let mut header_cells = vec![Cell::from(Text::from(vec![
+            Line::from(Span::styled(corner_top, secondary())),
+            Line::from(Span::styled("        feeds output", secondary())),
+        ]))];
+        for (i, &mix) in shown_mixes.iter().enumerate() {
+            let feeds = mix_output(m, mix);
+            let on_cursor = col_start + i == cur_col;
+            let letter_style = if on_cursor {
+                cyan_bold.add_modifier(Modifier::UNDERLINED)
+            } else if feeds.is_some() {
+                Style::default().add_modifier(Modifier::BOLD)
             } else {
-                format!("Mix {mix}")
+                secondary()
             };
-            header_cells.push(
-                Cell::from(label).style(
-                    Style::default()
-                        .fg(if used { Color::Yellow } else { Color::Cyan })
-                        .add_modifier(Modifier::BOLD),
-                ),
-            );
+            let feeds_style = if on_cursor {
+                Style::default().fg(Color::Cyan)
+            } else {
+                secondary()
+            };
+            header_cells.push(Cell::from(Text::from(vec![
+                Line::from(Span::styled(format!("{mix:^6}"), letter_style)),
+                Line::from(Span::styled(
+                    format!("{:^6}", feeds.unwrap_or_else(|| "—".into())),
+                    feeds_style,
+                )),
+            ])));
+        }
+        if hidden_right > 0 {
+            header_cells.push(Cell::from(Span::styled(
+                format!("{hidden_right} ▸"),
+                cyan_bold,
+            )));
         }
 
         let rows: Vec<Row> = shown_inputs
@@ -1947,40 +1985,27 @@ impl App {
             .map(|(local_r, &in_idx)| {
                 let r_idx = row_start + local_r;
                 let src = m.mixer_input_source(in_idx);
-                let row_label = format!("In {in_idx:02} [{src}]");
-                let mut cells = vec![Cell::from(row_label).style(if src == "Off" {
+                let off = src == "Off";
+                let label = format!(
+                    " In {in_idx:02}  {}",
+                    truncate(if off { "off" } else { src }, 13)
+                );
+                let label_style = if r_idx == cur_row {
+                    cyan_bold
+                } else if off {
                     secondary()
                 } else {
                     Style::default()
-                })];
-
+                };
+                let mut cells = vec![Cell::from(label).style(label_style)];
                 for (local_c, &mix) in shown_mixes.iter().enumerate() {
-                    let c_idx = col_start + local_c;
-                    let selected = r_idx == cur_row && c_idx == cur_col;
-                    let (txt, mut style) = if let Some(&cid) = m.matrix.cells.get(&(mix, in_idx))
-                        && let Some(c) = m.controls.get(&cid)
-                    {
-                        match c.opt_val() {
-                            None => ("  ?   ".into(), Style::default().fg(Color::Yellow)),
-                            Some(v) if v <= c.min => ("  -∞  ".into(), secondary()),
-                            Some(v) => {
-                                if let Some(db) = c.current_db() {
-                                    let col = if db > 0.25 {
-                                        Color::Red
-                                    } else if db.abs() < 0.25 {
-                                        Color::Green
-                                    } else {
-                                        Color::Yellow
-                                    };
-                                    (format!("{db:+5.1}"), Style::default().fg(col))
-                                } else {
-                                    (format!("{v:5}"), Style::default())
-                                }
-                            }
-                        }
-                    } else {
-                        ("  —   ".into(), secondary())
-                    };
+                    let selected = r_idx == cur_row && col_start + local_c == cur_col;
+                    let ctrl = m
+                        .matrix
+                        .cells
+                        .get(&(mix, in_idx))
+                        .and_then(|cid| m.controls.get(cid));
+                    let (txt, mut style) = matrix_cell(ctrl);
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
                     }
@@ -1990,21 +2015,51 @@ impl App {
             })
             .collect();
 
-        let mut widths = vec![Constraint::Length(22)];
-        for _ in shown_mixes {
-            widths.push(Constraint::Length(9));
+        let mut widths = vec![Constraint::Length(MATRIX_LABEL_W)];
+        widths.extend(
+            shown_mixes
+                .iter()
+                .map(|_| Constraint::Length(MATRIX_COL_W - 1)),
+        );
+        widths.push(Constraint::Length(4));
+        let table = Table::new(rows, widths)
+            .header(Row::new(header_cells).height(2))
+            .column_spacing(1);
+        f.render_widget(table, parts[0]);
+
+        let hidden_below = n_rows - row_end;
+        if hidden_below > 0 {
+            let first = m.matrix.inputs[row_end];
+            let last = m.matrix.inputs[n_rows - 1];
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" ↓ {hidden_below} more   In {first:02}–{last:02}   PgDn"),
+                    secondary(),
+                ))),
+                parts[1],
+            );
         }
 
-        let table = Table::new(rows, widths)
-            .header(Row::new(header_cells))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Mix matrix (dB · * = routed to an output) ")
-                    .border_style(decoration())
-                    .title_style(title_style()),
-            );
-        f.render_widget(table, area);
+        let mut legend = vec![
+            Span::styled(" ·", decoration()),
+            Span::styled(" −∞ (off)   ", secondary()),
+            Span::styled("0.0", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(" unity   ", secondary()),
+            Span::styled(
+                "+3.0",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" boost   ", secondary()),
+            Span::styled("— mix not routed to an output", secondary()),
+        ];
+        if hidden_right > 0 {
+            legend.push(Span::raw("   "));
+            legend.push(Span::styled(format!("{hidden_right} ▸"), cyan_bold));
+            legend.push(Span::styled(" more mixes", secondary()));
+        }
+        f.render_widget(Paragraph::new(Line::from(legend)), parts[2]);
     }
 
     fn render_pipewire(&self, f: &mut Frame, area: Rect) {
@@ -2180,10 +2235,25 @@ impl App {
                     m.matrix.mixes.get(self.matrix_col),
                     m.matrix.inputs.get(self.matrix_row),
                 ) {
-                    (Some(mix), Some(&input)) => format!(
-                        "Mix {mix} · In {input:02} [{}]",
-                        m.mixer_input_source(input)
-                    ),
+                    (Some(&mix), Some(&input)) => {
+                        let feeds = mix_output(m, mix)
+                            .map(|o| format!(" (feeds {o})"))
+                            .unwrap_or_default();
+                        let level = m
+                            .matrix
+                            .cells
+                            .get(&(mix, input))
+                            .and_then(|id| m.controls.get(id))
+                            .map(|c| match matrix_cell(Some(c)).0.trim() {
+                                "·" => "  −∞".to_string(),
+                                t => format!("  {t} dB"),
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "In {input:02} {} → Mix {mix}{feeds}{level}",
+                            m.mixer_input_source(input)
+                        )
+                    }
                     _ => String::new(),
                 }
             }
@@ -2487,6 +2557,74 @@ fn fit_header(segs: Vec<Vec<Span<'static>>>, right: Span<'static>, width: usize)
     Line::from(out)
 }
 
+/// Matrix column widths: the row label, and each mix column including its gap.
+const MATRIX_LABEL_W: u16 = 22;
+const MATRIX_COL_W: u16 = 7;
+
+/// The output a mix feeds, shortened for a 6-cell column header; `+N` when it
+/// feeds several. `None` when no analogue output takes the mix.
+fn mix_output(m: &ScarlettModel, mix: char) -> Option<String> {
+    let want = format!("Mix {mix}");
+    let outs: Vec<&str> = m
+        .routes
+        .iter()
+        .filter(|r| r.group == RouteGroup::AnalogueOut && r.current == want)
+        .map(|r| r.label.as_str())
+        .collect();
+    let first = short_output_name(outs.first()?);
+    Some(if outs.len() > 1 {
+        truncate(&format!("{first}+{}", outs.len() - 1), 6)
+    } else {
+        first
+    })
+}
+
+/// "Line 01 (Monitor L)" → "Mon L"; "Headphones 1 L" → "Phn1 L"; at most 6 characters.
+fn short_output_name(label: &str) -> String {
+    let name = match (label.find('('), label.rfind(')')) {
+        (Some(a), Some(b)) if b > a + 1 => &label[a + 1..b],
+        _ => label,
+    };
+    let short = name
+        .replace("Monitor", "Mon")
+        .replace("Headphones ", "Phn")
+        .replace("Phones ", "Phn")
+        .replace("Analogue Output ", "Out ")
+        .replace("Line ", "Ln ");
+    truncate(short.trim(), 6)
+}
+
+/// Text and style for one matrix cell: blank when the cell does not exist,
+/// `·` (decoration) for −∞, bold for unity, yellow bold with `+` for boost.
+fn matrix_cell(ctrl: Option<&AlsaControl>) -> (String, Style) {
+    let Some(c) = ctrl else {
+        return (String::new(), Style::default());
+    };
+    match c.opt_val() {
+        None => (
+            format!("{:>5}", "?"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Some(v) if v <= c.min => (format!("{:>5}", "·"), decoration()),
+        Some(v) => match c.current_db() {
+            Some(db) if db > 0.25 => (
+                format!("{db:+5.1}"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Some(db) if db.abs() < 0.25 => (
+                format!("{:>5}", "0.0"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Some(db) => (format!("{db:5.1}").replace('-', "−"), Style::default()),
+            None => (format!("{v:5}"), Style::default()),
+        },
+    }
+}
+
 /// Rows moved by PgUp / PgDn in the matrix.
 const MATRIX_PAGE: usize = 10;
 
@@ -2768,7 +2906,10 @@ mod tests {
         let mut app = App::for_test(Some(model_4i4()));
         app.tab = Tab::Matrix;
         let row = row_text(&render_to_buffer(&app, 95, 30), 28);
-        assert!(row.trim_end().ends_with("Mix A · In 01 [PCM 1]"), "{row:?}");
+        assert!(
+            row.trim_end().ends_with("In 01 PCM 1 → Mix A  −∞"),
+            "{row:?}"
+        );
     }
 
     #[test]
@@ -2961,6 +3102,78 @@ mod tests {
             screen.contains("↓ ") && screen.contains(" more"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn short_output_names_fit_a_column() {
+        assert_eq!(short_output_name("Line 01 (Monitor L)"), "Mon L");
+        assert_eq!(short_output_name("Headphones 1 L"), "Phn1 L");
+        assert_eq!(short_output_name("Analogue Output 07"), "Out 07");
+        assert!(
+            short_output_name("Some Very Long Output Name")
+                .chars()
+                .count()
+                <= 6
+        );
+    }
+
+    #[test]
+    fn matrix_cells_use_dot_blank_and_signed_boost() {
+        use crate::model::fixtures::mk_ctrl;
+        assert_eq!(matrix_cell(None).0, "");
+        let mut c = mk_ctrl(
+            1,
+            "Mix A Input 01 Playback Volume",
+            ControlKind::Int,
+            &[],
+            0,
+        );
+        let (txt, style) = matrix_cell(Some(&c));
+        assert_eq!(txt.trim(), "·");
+        assert_eq!(style.fg, Some(Color::DarkGray));
+        c.values = vec![c.max]; // +12 dB in the fixture range
+        let (txt, style) = matrix_cell(Some(&c));
+        assert!(txt.trim().starts_with('+'), "{txt:?}");
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        c.value_valid = false;
+        assert_eq!(matrix_cell(Some(&c)).0.trim(), "?");
+    }
+
+    #[test]
+    fn matrix_header_names_outputs_and_counts_overflow() {
+        let mut model = model_4i4();
+        // Route Analogue Output 01 to Mix A, and add mixes B..P with no cells.
+        model.controls.get_mut(&22).unwrap().values = vec![3];
+        model.recompute_derived();
+        model.matrix.mixes = ('A'..='P').collect();
+        let mut app = App::for_test(Some(model));
+        app.tab = Tab::Matrix;
+        let buf = render_to_buffer(&app, 95, 30);
+        let screen: Vec<String> = (0..30).map(|y| row_text(&buf, y)).collect();
+        let all = screen.join("\n");
+        let feeds = mix_output(app.model.as_ref().unwrap(), 'A').expect("Mix A feeds an output");
+        assert!(
+            screen
+                .iter()
+                .any(|r| r.contains("feeds output") && r.contains(&feeds)),
+            "{all}"
+        );
+        assert!(all.contains(" ▸"), "right overflow count shown");
+        assert!(
+            all.contains("−∞ (off)") && all.contains("mix not routed"),
+            "legend"
+        );
+        assert!(!all.contains("-∞"), "no ASCII -∞ in cells");
+        // Only one real cell exists; absent cells stay blank (no em dash in the body).
+        let body_row = screen.iter().find(|r| r.contains("In 01")).unwrap();
+        assert_eq!(body_row.matches('·').count(), 1, "{body_row:?}");
+        // Moving right past the window shows a left overflow count.
+        for _ in 0..15 {
+            press(&mut app, KeyCode::Char('l'));
+        }
+        let buf = render_to_buffer(&app, 95, 30);
+        let all: String = (0..30).map(|y| row_text(&buf, y)).collect();
+        assert!(all.contains("◂ "), "left overflow count shown");
     }
 
     #[test]
