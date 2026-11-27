@@ -1688,8 +1688,18 @@ impl App {
             .split(inner);
 
         for (col, col_area) in columns.iter().zip(col_areas.iter()) {
-            // Label (24) + bar + value (9) + CLIP badge (5) + state tag (14).
-            let bar_width = col_area.width.saturating_sub(52).max(8) as usize;
+            // Input tags get a column only when a row in this column shows one.
+            let tags_w = if col
+                .iter()
+                .flat_map(|(_, rows)| rows)
+                .any(|mc| input_tag_spans(m, mc).is_some())
+            {
+                INPUT_TAGS_W
+            } else {
+                0
+            };
+            // Label (24) + bar + value (9) + CLIP badge (5) + input tags + state tag (14).
+            let bar_width = col_area.width.saturating_sub(52 + tags_w as u16).max(8) as usize;
             let mut lines = vec![scale_row(bar_width)];
             let mut is_channel = vec![false];
             for (gi, (group, rows)) in col.iter().enumerate() {
@@ -1705,7 +1715,7 @@ impl App {
                 )));
                 is_channel.push(false);
                 for mc in rows {
-                    lines.push(self.meter_row(m, mc, bar_width));
+                    lines.push(self.meter_row(m, mc, bar_width, tags_w));
                     is_channel.push(true);
                 }
             }
@@ -1723,8 +1733,15 @@ impl App {
     }
 
     /// One Overview row: label, meter, level, then only the state that explains
-    /// the meter: a latched CLIP, MUTED, or the source feeding it.
-    fn meter_row(&self, m: &ScarlettModel, mc: &MeterChannel, bar_width: usize) -> Line<'static> {
+    /// the meter: a latched CLIP, the input's 48V / Inst / Air when an analogue
+    /// input feeds it, and MUTED or the source feeding it.
+    fn meter_row(
+        &self,
+        m: &ScarlettModel,
+        mc: &MeterChannel,
+        bar_width: usize,
+        tags_w: usize,
+    ) -> Line<'static> {
         let raw = self.meter_raw.get(mc.meter_index).copied().unwrap_or(0);
         let db = meter_to_dbfs_with_max(raw, m.meter_max);
         let peak = self
@@ -1745,6 +1762,11 @@ impl App {
             spans.push(Span::styled("CLIP", badge(Color::Red)));
         } else {
             spans.push(Span::raw("     "));
+        }
+        if tags_w > 0 {
+            spans.extend(
+                input_tag_spans(m, mc).unwrap_or_else(|| vec![Span::raw(" ".repeat(tags_w))]),
+            );
         }
         // An analogue output's meter row says when that output is muted.
         let muted = mc.group == RouteGroup::AnalogueOut
@@ -2735,6 +2757,43 @@ fn meter_bar(db: f64, peak: f64, width: usize) -> Vec<Span<'static>> {
     spans
 }
 
+/// Width of the Overview's input-tag slots: ` 48V ` badge, `Inst`, `Air`.
+const INPUT_TAGS_W: usize = 16;
+
+/// The 48V / Inst / Air tags of the analogue input feeding a meter row, in
+/// fixed slots so the column lines up; `None` when no analogue input feeds
+/// it or none of the three is on. 48V is a badge (it is a live alert); Inst
+/// and Air are words, so no tag is colour alone.
+fn input_tag_spans(m: &ScarlettModel, mc: &MeterChannel) -> Option<Vec<Span<'static>>> {
+    let input = crate::model::analogue_input_number(&mc.source)?;
+    let t = m.input_tags(input);
+    if !(t.phantom || t.inst || t.air) {
+        return None;
+    }
+    let word = |on: bool, w: &'static str| {
+        if on {
+            Span::styled(
+                format!(" {w}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(" ".repeat(w.len() + 1))
+        }
+    };
+    let phantom = if t.phantom {
+        Span::styled(" 48V ", badge(Color::Red))
+    } else {
+        Span::raw("     ")
+    };
+    // "  " + " 48V " + " Inst" + " Air" = 16 = INPUT_TAGS_W.
+    Some(vec![
+        Span::raw("  "),
+        phantom,
+        word(t.inst, "Inst"),
+        word(t.air, "Air"),
+    ])
+}
+
 /// The dB scale above the meters, aligned to `meter_bar` columns.
 fn scale_row(width: usize) -> Line<'static> {
     let mut row = vec![' '; width];
@@ -3575,6 +3634,50 @@ mod tests {
     }
 
     #[test]
+    fn overview_tags_input_rows_with_48v_inst_air() {
+        let mut app = App::for_test(Some(crate::model::fixtures::model_demo()));
+        app.meter_raw = vec![100; 18];
+        let rows = |app: &App| {
+            let buf = render_to_buffer(app, 95, 30);
+            (0..30)
+                .filter_map(|y| {
+                    let r = row_text(&buf, y);
+                    let x = r.find("48V")?;
+                    // 48V is a reversed badge, not colour alone.
+                    let col = r[..x].chars().count() as u16;
+                    assert!(buf[(col, y)].modifier.contains(Modifier::REVERSED));
+                    Some(r)
+                })
+                .collect::<Vec<_>>()
+        };
+        let tagged = rows(&app);
+        // Header badge plus Mix In 1, Mix In 2, Rec 1 and Rec 2.
+        assert_eq!(tagged.len(), 5, "{tagged:#?}");
+        let rec1 = tagged
+            .iter()
+            .find(|r| r.contains("← Analogue 1") && r.contains("Rec"))
+            .expect("Rec 1 row");
+        assert!(rec1.contains("48V  Inst Air"), "{rec1:?}");
+        let rec2 = tagged
+            .iter()
+            .find(|r| r.contains("← Analogue 2") && r.contains("Rec"))
+            .expect("Rec 2 row");
+        assert!(!rec2.contains("Inst") && !rec2.contains("Air"), "{rec2:?}");
+
+        // 48V off: Inst and Air remain; no row but the header loses its badge.
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&20)
+            .unwrap()
+            .values = vec![0];
+        assert!(rows(&app).is_empty());
+        let screen = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(screen.contains(" Inst Air  ← Analogue 1"), "{screen}");
+    }
+
+    #[test]
     fn overview_keys_never_arm_or_write() {
         let mut app = App::for_test(Some(model_4i4()));
         for code in [' ', '0', 'm', 'x', '+', '-', '{', '}', 'h', 'l', 'H', 'L'] {
@@ -3917,105 +4020,6 @@ mod tests {
         );
     }
 
-    /// Tokyo Night, as Omarchy ships it (`themes/tokyo-night/colors.toml`), for
-    /// README screenshots only. The TUI itself never uses RGB.
-    fn svg_color(c: Color, fg: bool) -> &'static str {
-        match c {
-            Color::Reset => {
-                if fg {
-                    "#a9b1d6"
-                } else {
-                    "#1a1b26"
-                }
-            }
-            Color::Red | Color::LightRed => "#f7768e",
-            Color::Green | Color::LightGreen => "#9ece6a",
-            Color::Yellow | Color::LightYellow => "#e0af68",
-            Color::Blue | Color::LightBlue => "#7aa2f7",
-            Color::Magenta | Color::LightMagenta => "#ad8ee6",
-            Color::Cyan | Color::LightCyan => "#449dab",
-            Color::DarkGray => "#414868",
-            Color::Gray | Color::White => "#c0caf5",
-            _ => "#a9b1d6",
-        }
-    }
-
-    /// Paint a rendered buffer as an SVG terminal: one text run per style span,
-    /// stretched to the cell grid so columns line up.
-    fn buffer_to_svg(buf: &Buffer) -> String {
-        let (cw, ch, fs) = (8.4_f32, 18.0_f32, 14.0_f32);
-        let (w, h) = (buf.area.width, buf.area.height);
-        let pad = 12.0;
-        let mut out = format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\">\n\
-             <rect width=\"100%\" height=\"100%\" rx=\"8\" fill=\"#1a1b26\"/>\n\
-             <g font-family=\"JetBrainsMono Nerd Font, monospace\" font-size=\"{fs}\">\n",
-            w as f32 * cw + 2.0 * pad,
-            h as f32 * ch + 2.0 * pad
-        );
-        let esc = |t: &str| {
-            t.replace('&', "&amp;")
-                .replace('<', "&lt;")
-                .replace('>', "&gt;")
-        };
-        for y in 0..h {
-            let mut x = 0;
-            while x < w {
-                let c0 = &buf[(x, y)];
-                let key = (c0.fg, c0.bg, c0.modifier);
-                let start = x;
-                let mut text = String::new();
-                while x < w && {
-                    let c = &buf[(x, y)];
-                    (c.fg, c.bg, c.modifier) == key
-                } {
-                    text.push_str(buf[(x, y)].symbol());
-                    x += 1;
-                }
-                let n = (x - start) as f32;
-                let rev = key.2.contains(Modifier::REVERSED);
-                let (fg, bg) = if rev {
-                    (svg_color(key.1, false), svg_color(key.0, true))
-                } else {
-                    (svg_color(key.0, true), svg_color(key.1, false))
-                };
-                let px = pad + start as f32 * cw;
-                let py = pad + y as f32 * ch;
-                if rev || key.1 != Color::Reset {
-                    out += &format!(
-                        "<rect x=\"{px}\" y=\"{py}\" width=\"{}\" height=\"{ch}\" fill=\"{bg}\"/>\n",
-                        n * cw
-                    );
-                }
-                if text.trim().is_empty() {
-                    continue;
-                }
-                let weight = if key.2.contains(Modifier::BOLD) {
-                    " font-weight=\"bold\""
-                } else {
-                    ""
-                };
-                let opacity = if key.2.contains(Modifier::DIM) {
-                    " fill-opacity=\"0.62\""
-                } else {
-                    ""
-                };
-                let deco = if key.2.contains(Modifier::UNDERLINED) {
-                    " text-decoration=\"underline\""
-                } else {
-                    ""
-                };
-                out += &format!(
-                    "<text x=\"{px}\" y=\"{}\" fill=\"{fg}\"{weight}{opacity}{deco} textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\" xml:space=\"preserve\">{}</text>\n",
-                    py + ch * 0.75,
-                    n * cw,
-                    esc(&text)
-                );
-            }
-        }
-        out + "</g>\n</svg>\n"
-    }
-
     /// Renders the real TUI against an attached Scarlett into
     /// `target/device-shots/tui-*.svg`, for checking a change on hardware.
     /// Opens the ALSA control interface read-only (no writes, no PCM). The
@@ -4040,7 +4044,9 @@ mod tests {
 
     /// The five README screens of `app`, as `(name, svg)`.
     fn shots(app: &mut App) -> Vec<(&'static str, String)> {
-        let shot = |app: &App, w: u16, h: u16| buffer_to_svg(&render_to_buffer(app, w, h));
+        let shot = |app: &App, w: u16, h: u16| {
+            crate::screenshot_svg::buffer_to_svg(&render_to_buffer(app, w, h))
+        };
         let mut out = Vec::new();
         app.tab = Tab::Overview;
         out.push(("overview", shot(app, 95, 30)));
@@ -4096,7 +4102,7 @@ mod tests {
                 Some(-15.0),
                 Some(-18.0),
                 Some(-19.0),
-                Some(-7.0),
+                Some(-4.0),
                 Some(-22.0),
                 Some(-16.0),
                 Some(-17.0),
@@ -4132,14 +4138,41 @@ mod tests {
             let path = dir.join(format!("tui-{name}.svg"));
             if update {
                 std::fs::write(&path, svg).unwrap();
-            } else if std::fs::read_to_string(&path).ok().as_deref() != Some(svg.as_str()) {
-                stale.push(format!("design/tui-{name}.svg"));
+                continue;
+            }
+            // Compare line by line, so a checkout that turned LF into CRLF
+            // (core.autocrlf) still passes; `.gitattributes` pins LF as well.
+            let committed = std::fs::read_to_string(&path).unwrap_or_default();
+            let first_diff = committed
+                .lines()
+                .map(|l| l.trim_end_matches('\r'))
+                .zip(svg.lines())
+                .position(|(a, b)| a != b);
+            if first_diff.is_some() || committed.lines().count() != svg.lines().count() {
+                let line = first_diff.map_or("length".into(), |n| format!("line {}", n + 1));
+                stale.push(format!("design/tui-{name}.svg ({line})"));
             }
         }
         assert!(
             stale.is_empty(),
             "README screenshots are out of date: {stale:?}. Run `make screenshots` and commit design/."
         );
+    }
+
+    /// DESIGN rule 6: no hex colours in this file. The README screenshots'
+    /// theme lives in `src/screenshot_svg.rs` instead.
+    #[test]
+    fn ui_source_has_no_hex_colours() {
+        let src = include_str!("ui.rs");
+        let hits: Vec<&str> = src
+            .match_indices("\"#")
+            .map(|(i, _)| &src[i + 2..])
+            .filter(|rest| {
+                let hex = rest.chars().take_while(|c| c.is_ascii_hexdigit()).count();
+                (hex == 3 || hex == 6 || hex == 8) && rest[hex..].starts_with('"')
+            })
+            .collect();
+        assert!(hits.is_empty(), "hex colour literal in src/ui.rs");
     }
 
     #[test]

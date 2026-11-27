@@ -33,6 +33,7 @@ event-driven `--daemon` JSON-lines interface.
 | `src/pipewire.rs` | Read-only `pw-link -l -I` parser and `pw-link -d` disconnect helper |
 | `src/daemon.rs` | Event-driven JSON-lines daemon (`poll()` on stdin + ALSA control FDs + optional 20 Hz meter stream) |
 | `src/ui.rs` | 5-tab Ratatui TUI using standard ANSI terminal colours |
+| `src/screenshot_svg.rs` | Test-only SVG painter for the README screenshots; the only file with RGB colours |
 | `manifest.json` | Omarchy plugin manifest (`id: io.github.kinggs.scarlett-tui`) at repo root for marketplace compatibility |
 | `Panel.qml` | Omarchy bar widget + `KeyboardPanel` popup using `qs.Ui` and `qs.Commons` |
 | `scripts/check-plugin.sh` | Static verification for `manifest.json`, `Panel.qml` `Text.PlainText` safety, `Style.duration(...)` motion, and `omarchy plugin validate` |

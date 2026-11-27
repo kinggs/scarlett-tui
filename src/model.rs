@@ -588,11 +588,106 @@ impl ScarlettModel {
                     .unwrap_or(false)
         })
     }
+
+    /// True while 48 V is on for input `input`. A switch named "Line In 1-2
+    /// Phantom Power …" covers inputs 1 and 2; one with no input number in its
+    /// name covers every input.
+    pub fn input_phantom_on(&self, input: u32) -> bool {
+        self.phantom_numids.iter().any(|&id| {
+            let Some(c) = self.controls.get(&id) else {
+                return false;
+            };
+            self.is_phantom_switch(id)
+                && c.opt_bool_val().unwrap_or(false)
+                && phantom_covers(&c.name, input)
+        })
+    }
+
+    /// The input states the Overview shows next to a meter fed by `input`.
+    pub fn input_tags(&self, input: u32) -> InputTags {
+        let ctl = |id: Option<u32>| id.and_then(|id| self.controls.get(&id));
+        let inp = self.inputs.iter().find(|i| i.index == input);
+        // Level is "Line"/"Inst" as an enum, or a switch that is on for Inst.
+        let inst = ctl(inp.and_then(|i| i.level_numid)).is_some_and(|c| match c.kind {
+            ControlKind::Enum => c.enum_label().eq_ignore_ascii_case("Inst"),
+            _ => c.bool_val(),
+        });
+        // Air is a switch (Gen 3) or an enum whose first item is "Off" (Gen 4).
+        let air = ctl(inp.and_then(|i| i.air_numid)).is_some_and(|c| match c.kind {
+            ControlKind::Enum => c.opt_val().is_some_and(|v| v > 0),
+            _ => c.bool_val(),
+        });
+        InputTags {
+            phantom: self.input_phantom_on(input),
+            inst,
+            air,
+        }
+    }
+
+    /// The meter that shows input `input`'s level. An analogue input has no
+    /// meter of its own, so this is the first PC capture channel it feeds,
+    /// else the first mixer input it feeds. `None` when nothing it feeds has a
+    /// meter, or when the meters carry no source names (`Meter NN`).
+    pub fn input_meter(&self, input: u32) -> Option<usize> {
+        let fed_by = |group: RouteGroup| {
+            self.meter_channels
+                .iter()
+                .find(|m| m.group == group && analogue_input_number(&m.source) == Some(input))
+                .map(|m| m.meter_index)
+        };
+        fed_by(RouteGroup::PcmCapture).or_else(|| fed_by(RouteGroup::MixerIn))
+    }
+}
+
+/// Input states shown beside a meter: 48 V, instrument level, Air.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InputTags {
+    pub phantom: bool,
+    pub inst: bool,
+    pub air: bool,
+}
+
+/// The analogue input a route source names: "Analogue 3" → 3. The scarlett2
+/// driver names them "Analogue N"; "Analog N", "Analogue In N", "Mic N" and
+/// "Line In N" are accepted too ⚠ (other spellings are guesses for models not
+/// yet tested). Digital sources (S/PDIF, ADAT, PCM, Mix) never match.
+pub fn analogue_input_number(source: &str) -> Option<u32> {
+    let s = source.trim();
+    [
+        "Analogue In ",
+        "Analogue ",
+        "Analog In ",
+        "Analog ",
+        "Line In ",
+        "Mic ",
+    ]
+    .iter()
+    .find_map(|p| s.strip_prefix(p))
+    .and_then(|n| n.trim().parse().ok())
+}
+
+/// True when a phantom switch's name covers input `input` ("Line In 1-2 …",
+/// "Line In 3 …", or no number for all inputs).
+fn phantom_covers(name: &str, input: u32) -> bool {
+    let Some(range) = name
+        .strip_prefix("Line In ")
+        .and_then(|r| r.split_whitespace().next())
+    else {
+        return true;
+    };
+    let mut ends = range.split(['-', '–']).map(|n| n.parse::<u32>());
+    match (ends.next(), ends.next()) {
+        (Some(Ok(a)), Some(Ok(b))) => (a..=b).contains(&input),
+        (Some(Ok(a)), None) => a == input,
+        _ => true,
+    }
 }
 
 /// Meter zones shared by the TUI and the panel (docs/DESIGN.md "Meter zones").
 /// Levels at or above `HOT_DBFS` are hot (caution); at or above `CLIP_DBFS` they clip.
-pub const HOT_DBFS: f64 = -9.0;
+/// −6 dBFS is where Focusrite's 3rd Gen Gain Halo turns amber. The halo turns
+/// red only at 0 dBFS; the latch fires 1 dB earlier on purpose.
+pub const HOT_DBFS: f64 = -6.0;
 pub const CLIP_DBFS: f64 = -1.0;
 
 /// Per-channel clip latch: set when a channel reaches `CLIP_DBFS`, held until cleared.
@@ -1127,6 +1222,88 @@ mod tests {
 
         model.controls.get_mut(&20).unwrap().values = vec![1];
         assert!(model.phantom_live());
+    }
+
+    #[test]
+    fn analogue_input_number_accepts_known_spellings_only() {
+        use super::analogue_input_number as n;
+        assert_eq!(n("Analogue 3"), Some(3));
+        assert_eq!(n("Analog 2"), Some(2));
+        assert_eq!(n("Analogue In 10"), Some(10));
+        assert_eq!(n("Mic 1"), Some(1));
+        assert_eq!(n("Line In 4"), Some(4));
+        for other in [
+            "PCM 1", "Mix A", "S/PDIF 1", "ADAT 3", "Off", "Analogue", "",
+        ] {
+            assert_eq!(n(other), None, "{other:?}");
+        }
+    }
+
+    #[test]
+    fn input_meter_prefers_capture_then_mixer_input() {
+        let model = super::fixtures::model_demo();
+        // Demo order: 4 outputs (0–3), 8 mixer inputs (4–11), 6 captures (12–17).
+        // Analogue 1 feeds mixer input 1 and capture 1: capture wins.
+        assert_eq!(model.input_meter(1), Some(12));
+        assert_eq!(model.input_meter(2), Some(13));
+        // Nothing carries Analogue 3.
+        assert_eq!(model.input_meter(3), None);
+
+        // With the capture routed elsewhere, fall back to the mixer input.
+        let mut m = model.clone();
+        for mc in m.meter_channels.iter_mut() {
+            if mc.group == RouteGroup::PcmCapture {
+                mc.source = "Mix A".into();
+            }
+        }
+        assert_eq!(m.input_meter(1), Some(4));
+
+        // Another driver spelling still matches.
+        m.meter_channels[4].source = "Analog 1".into();
+        assert_eq!(m.input_meter(1), Some(4));
+
+        // Neutral `Meter NN` labels carry no source: no guess by position.
+        for mc in m.meter_channels.iter_mut() {
+            mc.source.clear();
+            mc.group = RouteGroup::Unknown;
+        }
+        assert_eq!(m.input_meter(1), None);
+    }
+
+    #[test]
+    fn input_tags_follow_level_air_and_phantom_range() {
+        let mut model = super::fixtures::model_demo();
+        assert_eq!(
+            model.input_tags(1),
+            super::InputTags {
+                phantom: true,
+                inst: true,
+                air: true
+            }
+        );
+        assert_eq!(
+            model.input_tags(2),
+            super::InputTags {
+                phantom: true,
+                inst: false,
+                air: false
+            }
+        );
+        // "Line In 1-2" does not cover input 3; persistence never counts.
+        assert!(!model.input_phantom_on(3));
+        model.controls.get_mut(&20).unwrap().values = vec![0];
+        assert!(!model.input_phantom_on(1), "persistence on is not 48V live");
+        assert_eq!(model.input_tags(9), super::InputTags::default());
+
+        assert!(super::phantom_covers(
+            "Line In 3 Phantom Power Capture Switch",
+            3
+        ));
+        assert!(!super::phantom_covers(
+            "Line In 3 Phantom Power Capture Switch",
+            4
+        ));
+        assert!(super::phantom_covers("Phantom Power Capture Switch", 7));
     }
 
     #[test]

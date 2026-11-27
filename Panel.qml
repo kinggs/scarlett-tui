@@ -162,8 +162,11 @@ Panel {
   }
 
   // An analogue input has no meter of its own, so use the capture or mixer
-  // channel it feeds, found by its source name.
+  // channel it feeds. The daemon names it (`meter`, unit-tested in Rust and
+  // tolerant of other source spellings); older daemons fall back to matching
+  // the source name "Analogue N" here.
   function inputMeter(inp) {
+    if (inp && typeof inp.meter === "number" && inp.meter >= 0) return inp.meter
     var n = String((inp && inp.label) || "").match(/(\d+)\s*$/)
     if (!n) return -1
     var src = "Analogue " + Number(n[1])
@@ -298,6 +301,24 @@ Panel {
       }
     }
     return cols
+  }
+
+  // docs/DESIGN.md "States". A control the device will not let us change is
+  // read-only; one whose value could not be read is unknown and shows "—".
+  readonly property string readOnlyHint: "Set on device"
+  function isUnknown(t) { return !t || t.value === null || t.value === undefined || t.text === "?" }
+
+  // A disabled qs.Ui control gets no hover, so its own tooltip never shows.
+  // This sits over it (or over plain text) and shows `hint` instead.
+  component Hint: MouseArea {
+    id: hintArea
+    property string hint: ""
+    hoverEnabled: true
+    acceptedButtons: Qt.NoButton
+    PanelToolTip {
+      visible: hintArea.containsMouse && hintArea.hint !== ""
+      text: hintArea.hint
+    }
   }
 
   function toggleIndex(input, label) {
@@ -436,7 +457,7 @@ Panel {
     return db.toFixed(0) + " dB"
   }
 
-  // Caution tone for the −9 to −1 dBFS zone. Commons.Color has no warning role,
+  // Caution tone for the −6 to −1 dBFS zone. Commons.Color has no warning role,
   // so blend accent halfway toward urgent; it follows whichever theme is active.
   readonly property color cautionColor: Qt.tint(Commons.Color.accent, Util.alpha(Commons.Color.urgent, 0.5))
 
@@ -445,7 +466,7 @@ Panel {
     if (idx < 0 || idx >= meterDbfs.length) return Commons.Color.accent
     var db = Number(meterDbfs[idx])
     if (db >= -1) return Commons.Color.urgent
-    if (db >= -9) return root.cautionColor
+    if (db >= -6) return root.cautionColor
     return Commons.Color.accent
   }
 
@@ -963,6 +984,7 @@ Panel {
                       text: {
                         var t = cell.toggle
                         if (!t) return ""
+                        if (root.isUnknown(t)) return String(t.label || "") + " —"
                         if (t.kind === "enum" && t.active && t.label === "AIR") return "AIR · " + String(t.text || "")
                         if (t.kind === "enum") return String(t.text || t.label || "")
                         return String(t.label || "")
@@ -977,6 +999,15 @@ Panel {
                       verticalPadding: Style.space(3)
                       tooltipText: cell.toggle ? String(cell.toggle.label || "") + ": " + String(cell.toggle.text || "") : ""
                       onClicked: root.cycleToggle(cell.toggle)
+                    }
+
+                    Hint {
+                      anchors.fill: chip
+                      visible: chip.visible && (!chip.enabled || root.isUnknown(cell.toggle))
+                      hint: cell.toggle
+                        ? String(cell.toggle.label || "") + ": "
+                          + (root.isUnknown(cell.toggle) ? "value could not be read" : root.readOnlyHint)
+                        : ""
                     }
                   }
                 }
@@ -1029,6 +1060,7 @@ Panel {
                 readonly property bool isSwitch: String(modelData.label || "").indexOf("Remember") < 0
                 readonly property bool live: isSwitch && !!modelData.active
                 readonly property bool armed: isSwitch && root.armedPhantom === modelData.numid
+                readonly property bool unknown: root.isUnknown(modelData)
                 width: panelColumn.width
                 implicitHeight: Math.max(phLabel.implicitHeight, phSwitch.implicitHeight, phButton.implicitHeight)
 
@@ -1048,7 +1080,8 @@ Panel {
                   id: phButton
                   visible: phRow.isSwitch
                   hasCursor: root.hasNav("phantom", phRow.index)
-                  text: phRow.armed ? "Click again to enable 48V" : (phRow.live ? "48V LIVE" : "48V OFF")
+                  text: phRow.unknown ? "48V —"
+                    : (phRow.armed ? "Click again to enable 48V" : (phRow.live ? "48V LIVE" : "48V OFF"))
                   bordered: true
                   selected: phRow.live || phRow.armed
                   accent: phRow.armed ? root.cautionColor : Commons.Color.urgent
@@ -1077,6 +1110,12 @@ Panel {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   onToggled: root.cycleToggle(modelData)
+                }
+
+                Hint {
+                  anchors.fill: phButton.visible ? phButton : phSwitch
+                  visible: !modelData.rw || phRow.unknown
+                  hint: phRow.unknown ? "48V state could not be read" : root.readOnlyHint
                 }
               }
             }
@@ -1161,7 +1200,8 @@ Panel {
 
                       Text {
                         textFormat: Text.PlainText
-                        text: modelData.route_summary ? String(modelData.route_summary) : "—"
+                        // "?" is a source the device did not report: unknown.
+                        text: (modelData.route_summary && modelData.route_summary !== "?") ? String(modelData.route_summary) : "—"
                         color: Qt.darker(root.fg, 1.35)
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.caption
@@ -1211,7 +1251,7 @@ Panel {
                       enabled: !!modelData.mute_rw
                       opacity: modelData.mute_rw ? 1.0 : 0.45
                       // Always "MUTE": filled urgent when muted, a quiet outline when live.
-                      text: "MUTE"
+                      text: modelData.mute_unknown ? "MUTE —" : "MUTE"
                       bordered: true
                       selected: !!modelData.muted
                       accent: Commons.Color.urgent
@@ -1228,6 +1268,12 @@ Panel {
                           root.setControl(modelData.mute_numid, modelData.muted ? 0 : 1)
                         }
                       }
+                    }
+
+                    Hint {
+                      anchors.fill: muteBtn
+                      visible: muteBtn.visible && (!muteBtn.enabled || !!modelData.mute_unknown)
+                      hint: modelData.mute_unknown ? "Mute state could not be read" : root.readOnlyHint
                     }
                   }
 

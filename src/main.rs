@@ -3,6 +3,8 @@ mod daemon;
 mod keys;
 mod model;
 mod pipewire;
+#[cfg(test)]
+mod screenshot_svg;
 mod ui;
 
 use std::env;
