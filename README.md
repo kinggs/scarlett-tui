@@ -3,14 +3,21 @@
 [![CI](https://github.com/kinggs/scarlett-tui/actions/workflows/ci.yml/badge.svg)](https://github.com/kinggs/scarlett-tui/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A keyboard-first terminal mixer, routing matrix, live hardware level meter, and
-[Omarchy](https://omarchy.org) bar plugin for **Focusrite Scarlett** USB audio
-interfaces on Linux — written in Rust, talking straight to the mainline Linux
-kernel's `scarlett2` / FCP ALSA driver through `libasound`.
+A keyboard-first terminal mixer, routing matrix and live hardware level meter
+for **Focusrite Scarlett** USB audio interfaces on Linux — written in Rust,
+talking straight to the mainline Linux kernel's `scarlett2` / FCP ALSA driver
+through `libasound`.
 
-One compiled binary powers both the standalone Ratatui TUI and the Omarchy bar
-panel. No background daemon when unused, no Electron or GTK toolkit, no `sudo`,
-and no hardcoded ALSA `numid`s.
+The terminal UI runs on any Linux distro, in any terminal. An optional bar
+panel is included for [Omarchy](https://omarchy.org) desktops. One compiled
+binary powers both. No background daemon when unused, no Electron or GTK
+toolkit, no `sudo`, and no hardcoded ALSA `numid`s.
+
+| Part | Runs on | Needs |
+|---|---|---|
+| Terminal UI (`scarlett-tui`) | Any Linux | A supported interface, kernel 6.7+ and `alsa-lib`. PipeWire is optional (tab 5). |
+| JSON interface (`--json`, `--daemon`) | Any Linux | The same. Any bar, script or widget can read it. |
+| Bar panel (`Panel.qml`) | Omarchy only | The Omarchy shell. It is a Quickshell QML plugin that imports Omarchy's own `qs.Ui` and `qs.Commons` libraries, so a plain Quickshell setup cannot load it as it stands ⚠ (not tested). |
 
 <p align="center">
   <img src="design/tui-overview.png" alt="Overview tab at 95×30: a one-line header with Locked, 48.0 kHz, red 48V and CLIP badges and the model; every meter on a dB scale with peak ticks, each row naming its source; two muted headphone outputs and one latched clip" width="49%">
@@ -24,16 +31,16 @@ and no hardcoded ALSA `numid`s.
   <img src="design/tui-help.png" alt="The ? overlay: this tab's keys, safety keys, global keys and an About block with model, USB id, firmware and card" width="49%">
 </p>
 
-<p align="center"><em>The TUI at the 95×30 size of Omarchy's floating window, on a Scarlett 4i4 Gen 3:
+<p align="center"><em>The TUI at 95×30 cells, on a Scarlett 4i4 Gen 3:
 overview, mix matrix, I/O, and the <code>?</code> key overlay.</em></p>
 
 The screenshots are the real TUI drawing a demo state: a Scarlett 4i4 Gen 3
 fixture with the control names a real one has, set up to show 48V, a latched
 clip, muted headphones and a worked mix. They are not a capture of a session.
-They are painted in Omarchy's Tokyo Night palette (the TUI itself uses only the
-16 ANSI colours, so it follows your theme). `make screenshots` regenerates
+They are painted in the Tokyo Night palette (the TUI itself uses only the 16
+ANSI colours, so it follows whatever theme your terminal has). `make screenshots` regenerates
 them without hardware, and `make test` fails when they fall behind the code.
-⚠ The bar plugin panel is not pictured yet.
+⚠ The Omarchy bar panel is not pictured yet.
 
 ## Why this exists
 
@@ -43,8 +50,7 @@ mutes, the internal routing patchbay, the `Mix A–F` mixer matrix, and real-tim
 12-bit hardware level meters.
 
 The reference GUI (`alsa-scarlett-gui`) is great, and `alsamixer` works in a
-pinch, but if you live in the terminal (and on an Omarchy desktop) there was no
-dedicated TUI that shows the routing matrix, mix faders, live meters, and active
+pinch, but if you live in the terminal there was no dedicated TUI that shows the routing matrix, mix faders, live meters, and active
 PipeWire software links together in one place.
 
 ## Status and hardware support
@@ -85,27 +91,36 @@ your agent at `AGENTS.md` and `docs/HARDWARE-TESTING.md`.
 
 ### What this does today
 
-- **Tab 1 — Overview & Meters:** real-time 12-bit hardware `Level Meter` bars
-  with peak hold and dBFS readouts (mapped in `scarlett2_ports` destination
-  order), input badges, output signal paths, clock sync, firmware, active sample
-  rate, and active PipeWire Scarlett links.
-- **Tab 2 — I/O & Device:** `Line/Inst`, `Air` (handles both Gen 3 boolean
-  switches and Gen 4 3-state enums), `Pad`, `48V` phantom power, `Remember 48V`,
-  digital `Gain` / `Clip Safe` / `Link` (where present), `Line 01..NN` hardware
-  volumes & mutes, `Direct Monitor`, and `Standalone` switches.
-- **Tab 3 — Routing:** full hardware router for `Analogue Outputs`, `S/PDIF`,
-  `ADAT`, `Mixer Inputs`, `DSP Inputs`, and `PC Capture (Rec)`, showing resolved
-  signal chains (e.g. `Mix A ← PCM 1 + Analogue 2 (-6.0 dB)`).
-- **Tab 4 — Mix Matrix:** dynamic 2D dB grid (`Mix A..Z × In 01..NN`), with `*`
-  marking mixes currently routed to an output.
-- **Tab 5 — PipeWire Links:** live `pw-link` view filtered to Scarlett nodes
+The terminal UI, on any Linux:
+
+- **Tab 1 — Overview:** a read-only meters tab. Real-time 12-bit hardware
+  `Level Meter` bars with peak hold, a latched clip badge and dBFS readouts
+  (mapped in `scarlett2_ports` destination order); each row names the source
+  feeding it. The header shows clock sync, sample rate and a 48V badge.
+- **Tab 2 — I/O:** a board with one row per channel. `Line/Inst`, `Air`
+  (handles both Gen 3 boolean switches and Gen 4 3-state enums), `Pad`, digital
+  `Gain` / `Clip Safe` / `Link` (where present), `48V` phantom power in its own
+  section (two key presses to enable), `Line 01..NN` hardware volumes with
+  their mutes, `Direct Monitor`, and `Standalone` switches.
+- **Tab 3 — Device routing:** full hardware router for `Analogue Outputs`,
+  `S/PDIF`, `ADAT`, `Mixer Inputs`, `DSP Inputs`, and `PC Capture (Rec)`,
+  showing resolved signal chains (e.g. `Mix A ← PCM 1 + Analogue 2 (-6.0 dB)`).
+- **Tab 4 — Matrix:** dynamic 2D dB grid (`Mix A..Z × In 01..NN`); each mix
+  column names the output it feeds.
+- **Tab 5 — PipeWire graph:** live `pw-link` view filtered to Scarlett nodes
   first (toggle `a` for all nodes) so software loopbacks stand out beside
-  hardware routing, with `d` to disconnect.
-- **Omarchy bar plugin (`io.github.kinggs.scarlett-tui`):** compact bar widget
-  inspired by Omarchy's built-in `omarchy.audio` panel — live dB meters while
-  open, input chips, `48V` switches, clickable output routing rows, and one
-  click / `T` / right-click to launch `scarlett-tui` in a floating terminal
-  (`TUI.float`).
+  hardware routing, with `x` to disconnect. These links are software and are
+  not stored on the interface.
+- **JSON for your own bar or scripts:** `--json` prints one state snapshot;
+  `--daemon` is an event-driven JSON-lines interface on stdin/stdout.
+
+On Omarchy only:
+
+- **Bar panel (`io.github.kinggs.scarlett-tui`):** a compact bar widget in the
+  style of Omarchy's built-in `omarchy.audio` panel — one block per channel
+  with live meters while open, input chips, a two-step `48V` switch, output
+  mutes and source pickers, and `T` or right-click to open `scarlett-tui` in
+  Omarchy's floating terminal window.
 
 ### What this does not do (yet)
 
@@ -137,7 +152,7 @@ flowchart LR
     daemon["daemon.rs\n--json / --daemon\nJSON-lines protocol"]
   end
 
-  plugin["Panel.qml\nOmarchy bar plugin\n(Quickshell + qs.Ui)"]
+  plugin["Panel.qml\nOmarchy bar panel (optional)\n(Quickshell + qs.Ui)"]
 
   hw <--> alsa
   alsa --> model
@@ -159,7 +174,8 @@ flowchart LR
   controls exist. Without `fcp-server`, `scarlett-tui` detects the USB card and
   reports *Mixer unavailable* until controls appear.
 - **Runtime:** `alsa-lib` (`libasound.so.2`). Optional: `pipewire` (`pw-link`)
-  for Tab 5; Omarchy 4 + Quickshell if using the bar plugin.
+  for Tab 5. The bar panel additionally needs an Omarchy 4 desktop; nothing
+  else in this project does.
 - **Build:** Rust `1.100.0` (pinned in `rust-toolchain.toml`, `mise.toml`, and
   `Cargo.toml`), `libasound` linker library (`alsa-lib` / `libasound2-dev`),
   and a C linker.
@@ -181,10 +197,11 @@ Run it in any terminal with:
 scarlett-tui
 ```
 
-The TUI uses standard ANSI terminal colours, so it inherits your terminal
-(and Omarchy) theme automatically.
+The TUI uses the 16 standard ANSI terminal colours, so it inherits your
+terminal's theme automatically. It is designed for a 95×30 window and shows a
+"terminal too small" message under 80×24.
 
-### With the Omarchy bar plugin
+### With the bar panel (Omarchy only)
 
 ```sh
 git clone https://github.com/kinggs/scarlett-tui.git
