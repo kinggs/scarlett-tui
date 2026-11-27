@@ -12,6 +12,7 @@ actually in this repository. Our own code is MIT ([LICENSE](LICENSE)).
 | Linux kernel `sound/usb/fcp.c` (Focusrite Control Protocol driver) | Geoffrey D. Bennett | GPL-2.0 | **No source code.** The kernel side that large Gen 4 interfaces (16i16, 18i16, 18i20) need for their mixer controls |
 | [fcp-support](https://github.com/geoffreybennett/fcp-support) (`fcp-server`) | Geoffrey D. Bennett | GPL-3.0 | **Nothing.** The userspace daemon those Gen 4 interfaces need; `scarlett-tui` tells users to run it when mixer controls are missing |
 | [scarlett2](https://github.com/geoffreybennett/scarlett2) | Geoffrey D. Bennett | GPL-3.0 | **Nothing.** Firmware management tool; the README points to it because `scarlett-tui` never flashes firmware |
+| [Scarlett 3rd Gen user guides](https://fael-downloads-prod.focusrite.com/customer/prod/downloads/Scarlett%202i2%203rd%20Gen%20User%20Guide%20V2.pdf) and 4th Gen guides | Focusrite Audio Engineering Ltd | All rights reserved | **Nothing copied.** Read for the Gain Halo colour thresholds behind the meter zones (`docs/DESIGN.md`) |
 | [alsa-lib (`libasound`)](https://www.alsa-project.org/) | The ALSA Project | LGPL-2.1 | Dynamically linked at runtime via the public C `snd_ctl_*` ABI (`build.rs`) |
 
 ## Rust crate dependencies (in `Cargo.toml`)
