@@ -590,6 +590,52 @@ impl ScarlettModel {
     }
 }
 
+/// Meter zones shared by the TUI and the panel (docs/DESIGN.md "Meter zones").
+/// Levels at or above `HOT_DBFS` are hot (caution); at or above `CLIP_DBFS` they clip.
+pub const HOT_DBFS: f64 = -9.0;
+pub const CLIP_DBFS: f64 = -1.0;
+
+/// Per-channel clip latch: set when a channel reaches `CLIP_DBFS`, held until cleared.
+/// The TUI and the daemon both use it, so the panel and the TUI agree on what clipped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClipLatch {
+    latched: Vec<bool>,
+}
+
+impl ClipLatch {
+    /// Latch any channel at or above the clip threshold. Returns true if a new
+    /// channel latched on this frame.
+    pub fn update(&mut self, dbfs: &[f64]) -> bool {
+        if self.latched.len() != dbfs.len() {
+            self.latched.resize(dbfs.len(), false);
+        }
+        let mut newly = false;
+        for (slot, &db) in self.latched.iter_mut().zip(dbfs) {
+            if db >= CLIP_DBFS && !*slot {
+                *slot = true;
+                newly = true;
+            }
+        }
+        newly
+    }
+
+    pub fn clear(&mut self) {
+        self.latched.iter_mut().for_each(|c| *c = false);
+    }
+
+    pub fn get(&self, channel: usize) -> bool {
+        self.latched.get(channel).copied().unwrap_or(false)
+    }
+
+    pub fn any(&self) -> bool {
+        self.latched.iter().any(|&c| c)
+    }
+
+    pub fn as_slice(&self) -> &[bool] {
+        &self.latched
+    }
+}
+
 /// A unity (0 dB) jump larger than this needs a second key press (docs/DESIGN.md).
 pub const UNITY_CONFIRM_RISE_DB: f64 = 6.0;
 
@@ -1081,6 +1127,24 @@ mod tests {
 
         model.controls.get_mut(&20).unwrap().values = vec![1];
         assert!(model.phantom_live());
+    }
+
+    #[test]
+    fn clip_latch_holds_until_cleared() {
+        let mut latch = ClipLatch::default();
+        assert!(!latch.update(&[-1.1, -30.0]));
+        assert!(!latch.any());
+        assert!(latch.update(&[-1.0, -30.0]), "-1 dBFS latches");
+        assert!(latch.get(0) && !latch.get(1));
+        // Falling back below the threshold keeps the latch.
+        assert!(!latch.update(&[-40.0, -30.0]));
+        assert!(latch.get(0));
+        latch.clear();
+        assert!(!latch.any());
+        // A channel-count change resizes without panicking.
+        latch.update(&[0.0, -50.0, -50.0]);
+        assert_eq!(latch.as_slice(), &[true, false, false]);
+        assert!(!latch.get(7));
     }
 
     #[test]
