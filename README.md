@@ -222,18 +222,25 @@ if enabled); uninstalling removes no system configs or saved audio state.
 
 ## Keybindings
 
+A key means one thing on every tab; the full table is in
+[docs/DESIGN.md](docs/DESIGN.md#keymap), and `?` shows it in the app.
+
 | Key | Action |
 |---|---|
 | `1`–`5` / `Tab` / `Shift+Tab` | Switch tabs |
-| `h`/`j`/`k`/`l` or arrows | Move cursor / adjust values |
-| `Enter` / `Space` | Toggle switch, open route picker, or mute/unmute matrix cell |
-| `+` / `-` or `]` / `[` | Adjust level ±1 dB (Mix Matrix) |
-| `}` / `{` | Adjust level ±6 dB (Mix Matrix) |
-| `0` | Snap level to `0.0 dB` unity (or route to `Off` on Routing tab) |
-| `m` / `x` | Mute / toggle cell (or `Off` on Routing tab) |
-| `a` / `d` | Show all PipeWire links / disconnect selected link (Tab 5) |
+| `h`/`j`/`k`/`l` or arrows | Move the cursor; never changes a value |
+| `-` / `+` | Level −/+ 1 dB, or previous / next choice |
+| `{` / `}` | Level −/+ 6 dB |
+| `0` | Unity (`0.0 dB`); press twice if the rise is over +6 dB |
+| `m` | Mute an output or a matrix cell; again restores |
+| `Space` | Toggle a switch; 48V needs `Space` twice |
+| `Enter` | Open the route picker; set the source |
+| `x` | Disconnect: route off, or remove a PipeWire link |
+| `a` | Show all PipeWire links (Tab 5) |
+| `C` | Clear clip latches |
 | `c` | Switch card (when multiple Focusrite interfaces are connected) |
 | `r` | Rescan ALSA & PipeWire state |
+| `?` | Help overlay |
 | `q` / `Ctrl+C` | Quit |
 
 ### CLI modes

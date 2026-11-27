@@ -3,8 +3,8 @@ use crate::alsa_ctl::{
 };
 use crate::keys::{self, Action, Scope};
 use crate::model::{
-    CLIP_DBFS, ClipLatch, HOT_DBFS, RouteGroup, ScarlettModel, UnityJump, meter_to_dbfs_with_max,
-    unity_jump,
+    CLIP_DBFS, ClipLatch, HOT_DBFS, MeterChannel, RouteGroup, ScarlettModel, UnityJump,
+    meter_to_dbfs_with_max, unity_jump,
 };
 use crate::pipewire::{self, PwLink};
 use crossterm::{
@@ -193,7 +193,7 @@ enum ArmedAction {
         label: String,
         rise_db: Option<f64>,
     },
-    /// Enable 48 V phantom power; confirmed by Space or Enter within 3 s.
+    /// Enable 48 V phantom power; confirmed by Space within 3 s.
     Phantom { numid: u32, label: String },
 }
 
@@ -208,7 +208,8 @@ impl ArmedAction {
     fn confirmed_by(&self, code: KeyCode) -> bool {
         match self {
             ArmedAction::Unity { .. } => code == KeyCode::Char('0'),
-            ArmedAction::Phantom { .. } => matches!(code, KeyCode::Char(' ') | KeyCode::Enter),
+            // Only Space confirms 48V (docs/DESIGN.md "48V keys").
+            ArmedAction::Phantom { .. } => code == KeyCode::Char(' '),
         }
     }
 
@@ -1274,7 +1275,7 @@ impl App {
                     filtering: false,
                 });
             }
-            Action::Right => {
+            Action::Inc => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1286,7 +1287,7 @@ impl App {
                     self.write_control(numid, next);
                 }
             }
-            Action::Left => {
+            Action::Dec => {
                 if !ctrl.is_editable() {
                     self.set_status(format!("'{}' is read-only", ctrl.name));
                     return;
@@ -1466,8 +1467,10 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Length(2), // Tabs
+                // One header line and one tab line; the body's own border is
+                // the rule under them (docs/DESIGN.md "Layout: Chrome").
+                Constraint::Length(1), // Header
+                Constraint::Length(1), // Tabs
                 Constraint::Min(8),    // Body
                 Constraint::Length(2), // Footer / key hints
             ])
@@ -1565,7 +1568,7 @@ impl App {
                     secondary()
                 },
             );
-            fit_header(segs, pw, area.width.saturating_sub(2) as usize)
+            fit_header(segs, pw, area.width as usize)
         } else if let Some(req) = self.card_override {
             Line::from(Span::styled(
                 format!(" ✕ Focusrite card {req} not connected · r rescan"),
@@ -1578,14 +1581,7 @@ impl App {
             ))
         };
 
-        let header = Paragraph::new(line).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" scarlett-tui ")
-                .border_style(decoration())
-                .title_style(title_style()),
-        );
-        f.render_widget(header, area);
+        f.render_widget(Paragraph::new(line), area);
     }
 
     fn render_tabs(&self, f: &mut Frame, area: Rect) {
@@ -1627,277 +1623,148 @@ impl App {
             return;
         }
 
-        // Under 120 columns the meters stack full-width above the summary, so
-        // bars stay long enough to read −6 vs −12 (docs/DESIGN.md "Layout").
-        let cols = if area.width < 120 {
-            Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(area)
-        } else {
-            Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-                .split(area)
-        };
+        // Meters only (docs/DESIGN.md "Layout: Overview"). This tab is read-only:
+        // settings live on the I/O and Device routing tabs, so the summary that
+        // used to repeat them is gone and the meters get the whole body.
+        let visible: Vec<&MeterChannel> = m
+            .meter_channels
+            .iter()
+            .filter(|mc| {
+                // Hide unrouted, silent channels, but never one holding a clip latch.
+                !(mc.source == "Off"
+                    && self.meter_raw.get(mc.meter_index).copied().unwrap_or(0) == 0
+                    && !self.clips.get(mc.meter_index))
+            })
+            .collect();
 
-        // Left: Live Hardware Level Meters
-        // Label (24) + bar + value (9) + CLIP badge (7) + borders (2).
-        let bar_width = cols[0].width.saturating_sub(44).max(8) as usize;
-        let mut meter_lines = vec![scale_row(bar_width)];
-        let mut is_channel = vec![false];
-        let mut last_group: Option<RouteGroup> = None;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Meters ")
+            .border_style(decoration())
+            .title_style(title_style());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
 
-        for mc in &m.meter_channels {
-            // Hide unrouted, silent channels, but never one holding a clip latch.
-            if mc.source == "Off"
-                && self.meter_raw.get(mc.meter_index).copied().unwrap_or(0) == 0
-                && !self.clips.get(mc.meter_index)
-            {
-                continue;
+        if visible.is_empty() {
+            let p = Paragraph::new(Line::from(Span::styled(
+                " No hardware level meter exposed by this model.",
+                secondary(),
+            )));
+            f.render_widget(p, inner);
+            return;
+        }
+
+        // Group the rows, then lay the groups out in one column, or in two when
+        // the window is wide and one column would overflow.
+        let mut groups: Vec<(RouteGroup, Vec<&MeterChannel>)> = Vec::new();
+        for mc in visible {
+            match groups.last_mut() {
+                Some((g, rows)) if *g == mc.group => rows.push(mc),
+                _ => groups.push((mc.group, vec![mc])),
             }
-            if last_group != Some(mc.group) {
-                if last_group.is_some() {
-                    meter_lines.push(Line::from(""));
+        }
+        // Lines a column needs: the scale row, a title per group, a blank
+        // between groups, and one row per channel.
+        let lines_for = |gs: &[(RouteGroup, Vec<&MeterChannel>)]| {
+            1 + gs.iter().map(|(_, r)| r.len() + 1).sum::<usize>() + gs.len().saturating_sub(1)
+        };
+        let inner_h = inner.height as usize;
+        let two_cols = area.width >= 120 && groups.len() > 1 && lines_for(&groups) > inner_h;
+        let columns: Vec<&[(RouteGroup, Vec<&MeterChannel>)]> = if two_cols {
+            // Split at the group boundary that best balances the two columns.
+            let split = (1..groups.len())
+                .min_by_key(|&i| lines_for(&groups[..i]).abs_diff(lines_for(&groups[i..])))
+                .unwrap_or(1);
+            vec![&groups[..split], &groups[split..]]
+        } else {
+            vec![&groups[..]]
+        };
+        let col_areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints(vec![
+                Constraint::Ratio(1, columns.len() as u32);
+                columns.len()
+            ])
+            .split(inner);
+
+        for (col, col_area) in columns.iter().zip(col_areas.iter()) {
+            // Label (24) + bar + value (9) + CLIP badge (5) + state tag (14).
+            let bar_width = col_area.width.saturating_sub(52).max(8) as usize;
+            let mut lines = vec![scale_row(bar_width)];
+            let mut is_channel = vec![false];
+            for (gi, (group, rows)) in col.iter().enumerate() {
+                if gi > 0 {
+                    lines.push(Line::from(""));
                     is_channel.push(false);
                 }
-                meter_lines.push(Line::from(Span::styled(
-                    format!(" {}", mc.group.title()),
+                lines.push(Line::from(Span::styled(
+                    format!(" {}", group.title()),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 )));
                 is_channel.push(false);
-                last_group = Some(mc.group);
+                for mc in rows {
+                    lines.push(self.meter_row(m, mc, bar_width));
+                    is_channel.push(true);
+                }
             }
-
-            let raw = self.meter_raw.get(mc.meter_index).copied().unwrap_or(0);
-            let db = meter_to_dbfs_with_max(raw, m.meter_max);
-            let peak = self
-                .meter_peak
-                .get(mc.meter_index)
-                .copied()
-                .unwrap_or(-96.0);
-            let db_text = if db <= -60.0 {
-                "  -∞ dB".to_string()
-            } else {
-                format!("{db:+5.1} dB")
-            };
-            let raw_label = if mc.source.is_empty() {
-                mc.label.clone()
-            } else {
-                format!("{} [{}]", mc.label, mc.source)
-            };
-            let label = truncate(&raw_label, 22);
-
-            let mut spans = vec![Span::raw(format!(" {label:<22} "))];
-            spans.extend(meter_bar(db, peak, bar_width));
-            spans.push(Span::raw(format!(" {db_text}")));
-            if self.clips.get(mc.meter_index) {
-                spans.push(Span::raw(" "));
-                spans.push(Span::styled("CLIP", badge(Color::Red)));
-            }
-            meter_lines.push(Line::from(spans));
-            is_channel.push(true);
-        }
-
-        if meter_lines.len() == 1 {
-            meter_lines = vec![Line::from(Span::styled(
-                " No hardware level meter exposed by this model.",
-                secondary(),
-            ))];
-            is_channel = vec![false];
-        }
-
-        // Never cut rows silently: show what fits, then "↓ N more".
-        let inner_h = cols[0].height.saturating_sub(2) as usize;
-        if meter_lines.len() > inner_h && inner_h > 1 {
-            let hidden = is_channel[inner_h - 1..].iter().filter(|&&c| c).count();
-            meter_lines.truncate(inner_h - 1);
-            meter_lines.push(Line::from(Span::styled(
-                format!(" ↓ {hidden} more (widen or heighten the window)"),
-                secondary(),
-            )));
-        }
-
-        let meter_panel = Paragraph::new(meter_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Live Hardware Meters (ALSA) ")
-                .border_style(decoration())
-                .title_style(title_style()),
-        );
-        f.render_widget(meter_panel, cols[0]);
-
-        // Right: Summary of Inputs + Outputs + Active Routing
-        let mut info_lines = Vec::new();
-        info_lines.push(Line::from(Span::styled(
-            " Inputs",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for inp in &m.inputs {
-            let mut badges = Vec::new();
-            if let Some(id) = inp.level_numid
-                && let Some(c) = m.controls.get(&id)
-            {
-                let lbl = c.enum_label();
-                badges.push(Span::styled(
-                    format!("[{lbl}]"),
-                    if lbl == "Inst" {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        secondary()
-                    },
-                ));
-            }
-            if let Some(id) = inp.air_numid
-                && let Some(c) = m.controls.get(&id)
-            {
-                let on = c.opt_val().unwrap_or(0) > 0;
-                let txt = if c.kind == ControlKind::Enum && on {
-                    format!("[Air:{}]", c.enum_label())
-                } else {
-                    "[Air]".into()
-                };
-                badges.push(Span::raw(" "));
-                badges.push(Span::styled(
-                    txt,
-                    if on {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        secondary()
-                    },
-                ));
-            }
-            if let Some(id) = inp.pad_numid
-                && let Some(c) = m.controls.get(&id)
-            {
-                badges.push(Span::raw(" "));
-                badges.push(Span::styled(
-                    "[Pad]",
-                    if c.bool_val() {
-                        Style::default().fg(Color::Cyan)
-                    } else {
-                        secondary()
-                    },
-                ));
-            }
-            if let Some(id) = inp.gain_numid
-                && let Some(c) = m.controls.get(&id)
-            {
-                let gtxt = match c.current_db() {
-                    Some(db) => format!(" {db:.0} dB"),
-                    None => match c.opt_val() {
-                        Some(v) => format!(" {v}"),
-                        None => " ?".into(),
-                    },
-                };
-                badges.push(Span::raw(gtxt));
-            }
-            let mut spans = vec![Span::raw(format!("  {:<8} ", inp.label))];
-            spans.extend(badges);
-            info_lines.push(Line::from(spans));
-        }
-
-        for &pid in &m.phantom_numids {
-            if let Some(c) = m.controls.get(&pid) {
-                let short = c.name.replace(" Capture Switch", "");
-                let (txt, style) = match c.opt_bool_val() {
-                    Some(true) if m.is_phantom_switch(pid) => (" 48V ", badge(Color::Red)),
-                    Some(true) => ("ON", Style::default().fg(Color::Green)),
-                    Some(false) => ("OFF", secondary()),
-                    None => ("?", Style::default().fg(Color::Yellow)),
-                };
-                info_lines.push(Line::from(vec![
-                    Span::raw(format!("  {short}: ")),
-                    Span::styled(txt, style),
-                ]));
-            }
-        }
-
-        info_lines.push(Line::from(""));
-        info_lines.push(Line::from(Span::styled(
-            " Outputs & Routing",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )));
-        for r in m
-            .routes
-            .iter()
-            .filter(|r| r.group == RouteGroup::AnalogueOut)
-        {
-            let out_extra = m
-                .outputs
-                .iter()
-                .find(|o| o.index == r.channel)
-                .map(|o| {
-                    let muted = o
-                        .mute_numid
-                        .and_then(|id| m.controls.get(&id))
-                        .map(|c| c.bool_val())
-                        .unwrap_or(false);
-                    if muted {
-                        " [MUTE]".to_string()
-                    } else {
-                        o.volume_numid
-                            .and_then(|id| m.controls.get(&id))
-                            .and_then(|c| c.current_db())
-                            .map(|db| format!(" {db:.0}dB"))
-                            .unwrap_or_default()
-                    }
-                })
-                .unwrap_or_default();
-            info_lines.push(Line::from(vec![
-                Span::raw(format!("  {:<21} ", truncate(&r.label, 21))),
-                Span::styled(r.summary.clone(), Style::default().fg(Color::Green)),
-                Span::styled(out_extra, secondary()),
-            ]));
-        }
-
-        if !m.matrix.is_empty() {
-            info_lines.push(Line::from(""));
-            info_lines.push(Line::from(vec![
-                Span::styled(" Mix Matrix: ", Style::default().fg(Color::Cyan)),
-                Span::raw(format!(
-                    "{} mixes × {} inputs (press 4 to edit)",
-                    m.matrix.mixes.len(),
-                    m.matrix.inputs.len()
-                )),
-            ]));
-        }
-
-        let pw_scarlett: Vec<&PwLink> = self.pw_links.iter().filter(|l| l.is_scarlett).collect();
-        if !pw_scarlett.is_empty() {
-            info_lines.push(Line::from(""));
-            info_lines.push(Line::from(Span::styled(
-                format!(" PipeWire graph links ({})", pw_scarlett.len()),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            )));
-            for l in pw_scarlett.iter().take(6) {
-                info_lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {} → {}",
-                        pipewire::short_port(&l.output_port),
-                        pipewire::short_port(&l.input_port)
-                    ),
+            // Never cut rows silently: show what fits, then "↓ N more".
+            if lines.len() > inner_h && inner_h > 1 {
+                let hidden = is_channel[inner_h - 1..].iter().filter(|&&c| c).count();
+                lines.truncate(inner_h - 1);
+                lines.push(Line::from(Span::styled(
+                    format!(" ↓ {hidden} more (widen or heighten the window)"),
                     secondary(),
                 )));
             }
+            f.render_widget(Paragraph::new(lines), *col_area);
         }
+    }
 
-        let info_panel = Paragraph::new(info_lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Status & Signal Path ")
-                .border_style(decoration())
-                .title_style(title_style()),
-        );
-        f.render_widget(info_panel, cols[1]);
+    /// One Overview row: label, meter, level, then only the state that explains
+    /// the meter: a latched CLIP, MUTED, or the source feeding it.
+    fn meter_row(&self, m: &ScarlettModel, mc: &MeterChannel, bar_width: usize) -> Line<'static> {
+        let raw = self.meter_raw.get(mc.meter_index).copied().unwrap_or(0);
+        let db = meter_to_dbfs_with_max(raw, m.meter_max);
+        let peak = self
+            .meter_peak
+            .get(mc.meter_index)
+            .copied()
+            .unwrap_or(-96.0);
+        let db_text = if db <= -60.0 {
+            "  -∞ dB".to_string()
+        } else {
+            format!("{db:+5.1} dB")
+        };
+        let mut spans = vec![Span::raw(format!(" {:<22} ", truncate(&mc.label, 22)))];
+        spans.extend(meter_bar(db, peak, bar_width));
+        spans.push(Span::raw(format!(" {db_text}")));
+        if self.clips.get(mc.meter_index) {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled("CLIP", badge(Color::Red)));
+        } else {
+            spans.push(Span::raw("     "));
+        }
+        // An analogue output's meter row says when that output is muted.
+        let muted = mc.group == RouteGroup::AnalogueOut
+            && m.routes
+                .iter()
+                .find(|r| r.group == mc.group && r.label == mc.label)
+                .and_then(|r| m.outputs.iter().find(|o| o.index == r.channel))
+                .and_then(|o| o.mute_numid)
+                .and_then(|id| m.controls.get(&id))
+                .is_some_and(|c| c.bool_val());
+        if muted {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(" MUTED ", badge(Color::Red)));
+        } else if !mc.source.is_empty() {
+            spans.push(Span::styled(
+                format!("  ← {}", truncate(&mc.source, 10)),
+                secondary(),
+            ));
+        }
+        Line::from(spans)
     }
 
     fn render_io(&self, f: &mut Frame, area: Rect) {
@@ -2212,7 +2079,7 @@ impl App {
             .constraints([
                 Constraint::Min(3),    // table (2 header rows + cells)
                 Constraint::Length(1), // ↓ N more
-                Constraint::Length(1), // legend
+                Constraint::Length(1), // N ▸ more mixes
             ])
             .split(inner);
 
@@ -2336,26 +2203,15 @@ impl App {
             );
         }
 
-        let mut legend = vec![
-            Span::styled(" ·", decoration()),
-            Span::styled(" −∞ (off)   ", secondary()),
-            Span::styled("0.0", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" unity   ", secondary()),
-            Span::styled(
-                "+3.0",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" boost   ", secondary()),
-            Span::styled("— mix not routed to an output", secondary()),
-        ];
+        // The cell legend lives in the ? overlay; this row only counts the
+        // mixes hidden to the right.
         if hidden_right > 0 {
-            legend.push(Span::raw("   "));
-            legend.push(Span::styled(format!("{hidden_right} ▸"), cyan_bold));
-            legend.push(Span::styled(" more mixes", secondary()));
+            let more = vec![
+                Span::styled(format!(" {hidden_right} ▸"), cyan_bold),
+                Span::styled(" more mixes", secondary()),
+            ];
+            f.render_widget(Paragraph::new(Line::from(more)), parts[2]);
         }
-        f.render_widget(Paragraph::new(Line::from(legend)), parts[2]);
     }
 
     fn render_pipewire(&self, f: &mut Frame, area: Rect) {
@@ -2673,6 +2529,24 @@ impl App {
             )));
         } else {
             left.extend(own);
+        }
+        if scope == Scope::Matrix {
+            left.push(Line::from(""));
+            left.push(heading("Cells"));
+            left.push(Line::from(vec![
+                Span::styled(" ·", decoration()),
+                Span::raw(" −∞ (off)   "),
+                Span::styled("0.0", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" unity   "),
+                Span::styled(
+                    "+3.0",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" boost"),
+            ]));
+            left.push(Line::from(" —  mix not routed to an output"));
         }
         left.push(Line::from(""));
         left.push(heading("Safety"));
@@ -3193,6 +3067,47 @@ mod tests {
     }
 
     #[test]
+    fn only_space_confirms_an_armed_48v() {
+        let mut app = io_app_on_phantom();
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_some());
+        // Enter cancels the arm and never confirms or re-arms: 48V stays off.
+        press(&mut app, KeyCode::Enter);
+        assert!(app.armed.is_none(), "Enter must not confirm or arm 48V");
+        assert!(app.status_msg.contains("Space"));
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_some(), "Space arms");
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.armed.is_none(), "Space confirms");
+    }
+
+    #[test]
+    fn matrix_space_and_enter_do_not_touch_a_cell() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        for code in [KeyCode::Char(' '), KeyCode::Enter, KeyCode::Char('x')] {
+            press(&mut app, code);
+            assert!(app.matrix_prev_levels.is_empty(), "{code:?} muted a cell");
+            assert!(app.status_msg.is_empty(), "{code:?} did something");
+        }
+    }
+
+    #[test]
+    fn routing_picker_opens_on_enter_only() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Routing;
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.route_picker.is_none());
+        press(&mut app, KeyCode::Enter);
+        assert!(app.route_picker.is_some());
+        // Space does not set the source; Esc cancels.
+        press(&mut app, KeyCode::Char(' '));
+        assert!(app.route_picker.is_some());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.route_picker.is_none());
+    }
+
+    #[test]
     fn phantom_arm_times_out_after_three_seconds() {
         let mut app = io_app_on_phantom();
         press(&mut app, KeyCode::Char(' '));
@@ -3254,7 +3169,7 @@ mod tests {
     fn header_shows_48v_badge_only_while_live() {
         let mut app = App::for_test(Some(model_4i4()));
         let buf = render_to_buffer(&app, 95, 30);
-        assert!(!row_text(&buf, 1).contains("48V"));
+        assert!(!row_text(&buf, 0).contains("48V"));
 
         app.model
             .as_mut()
@@ -3264,11 +3179,11 @@ mod tests {
             .unwrap()
             .values = vec![1];
         let buf = render_to_buffer(&app, 95, 30);
-        let row = row_text(&buf, 1);
+        let row = row_text(&buf, 0);
         let x = row[..row.find("48V").expect("header badge")]
             .chars()
             .count() as u16;
-        let cell = &buf[(x, 1)];
+        let cell = &buf[(x, 0)];
         assert_eq!(cell.fg, Color::Red);
         assert!(cell.modifier.contains(Modifier::REVERSED));
     }
@@ -3327,13 +3242,52 @@ mod tests {
         assert!(!app.show_help);
     }
 
+    /// docs/DESIGN.md "Layout: Chrome": the body gets 26 of 30 rows.
+    #[test]
+    fn chrome_is_one_header_line_and_one_tab_line() {
+        let app = App::for_test(Some(model_4i4()));
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(row_text(&buf, 0).contains("● Locked"), "header on row 0");
+        assert!(!row_text(&buf, 0).contains("scarlett-tui"), "no header box");
+        assert!(row_text(&buf, 1).contains("1 Overview"), "tabs on row 1");
+        assert!(row_text(&buf, 2).starts_with('┌'), "body starts on row 2");
+        assert!(row_text(&buf, 27).starts_with('└'), "body ends on row 27");
+    }
+
+    #[test]
+    fn footer_keeps_tab_keys_and_drops_global_noise() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        let hints = row_text(&render_to_buffer(&app, 95, 30), 29);
+        assert!(
+            hints.contains("unity") && hints.contains("quit"),
+            "{hints:?}"
+        );
+        assert!(
+            !hints.contains("tabs") && !hints.contains("rescan"),
+            "{hints:?}"
+        );
+        assert!(hints.trim_end().ends_with("? help"), "{hints:?}");
+    }
+
+    #[test]
+    fn matrix_legend_is_in_the_help_overlay() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        let tab = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(!tab.contains("mix not routed"), "legend left the tab");
+        press(&mut app, KeyCode::Char('?'));
+        let help = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(help.contains("−∞ (off)") && help.contains("mix not routed"));
+    }
+
     #[test]
     fn block_titles_hold_names_only() {
         let mut app = App::for_test(Some(model_4i4()));
         for tab in Tab::ALL {
             app.tab = tab;
             let buf = render_to_buffer(&app, 95, 30);
-            let body = row_text(&buf, 5);
+            let body = row_text(&buf, 2);
             assert!(
                 !body.contains("·  ") && !body.contains("toggle"),
                 "{body:?}"
@@ -3535,7 +3489,7 @@ mod tests {
             .get_mut(&20)
             .unwrap()
             .values = vec![1];
-        let narrow = row_text(&render_to_buffer(&app, 95, 30), 1);
+        let narrow = row_text(&render_to_buffer(&app, 95, 30), 0);
         let (sync, rate, v48, model) = (
             narrow.find("● Locked").expect("sync"),
             narrow.find("Idle").expect("rate"),
@@ -3551,7 +3505,7 @@ mod tests {
                 .trim_end()
                 .ends_with("PW 0")
         );
-        let wide = row_text(&render_to_buffer(&app, 160, 36), 1);
+        let wide = row_text(&render_to_buffer(&app, 160, 36), 0);
         assert!(wide.contains("USB 1235:8212"), "{wide:?}");
     }
 
@@ -3567,20 +3521,107 @@ mod tests {
         assert_eq!(text, "aaaabbbb");
     }
 
+    /// docs/DESIGN.md "Layout: Overview": meters only, at every width.
     #[test]
-    fn overview_stacks_meters_above_summary_under_120_columns() {
+    fn overview_is_meters_only() {
         let app = App::for_test(Some(model_4i4()));
-        let find_row = |buf: &Buffer, h: u16, needle: &str| {
-            (0..h).find(|&y| row_text(buf, y).contains(needle))
+        for (w, h) in [(95, 30), (160, 36)] {
+            let screen = screen_text(&render_to_buffer(&app, w, h));
+            assert!(screen.contains(" Meters "), "{screen}");
+            assert!(!screen.contains("Status & Signal Path"), "{screen}");
+            assert!(!screen.contains("Outputs & Routing"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn overview_rows_carry_source_and_muted() {
+        let mut model = model_4i4();
+        let (route_label, mute_id) = model
+            .routes
+            .iter()
+            .filter(|r| r.group == RouteGroup::AnalogueOut)
+            .find_map(|r| {
+                let out = model.outputs.iter().find(|o| o.index == r.channel)?;
+                Some((r.label.clone(), out.mute_numid?))
+            })
+            .expect("fixture has an analogue output with a mute switch");
+        model.meter_channels = vec![crate::model::MeterChannel {
+            meter_index: 0,
+            label: route_label.clone(),
+            source: "PCM 1".into(),
+            group: RouteGroup::AnalogueOut,
+        }];
+        let mut app = App::for_test(Some(model));
+        app.meter_raw = vec![100];
+        let find = |app: &App| {
+            let buf = render_to_buffer(app, 95, 30);
+            (0..30)
+                .map(|y| row_text(&buf, y))
+                .find(|r| r.contains(&truncate(&route_label, 22)))
+                .expect("meter row")
         };
-        let buf = render_to_buffer(&app, 95, 30);
-        let meters = find_row(&buf, 30, "Live Hardware Meters").unwrap();
-        let summary = find_row(&buf, 30, "Status & Signal Path").unwrap();
-        assert!(meters < summary, "stacked at 95 columns");
-        let buf = render_to_buffer(&app, 160, 36);
-        let meters = find_row(&buf, 36, "Live Hardware Meters").unwrap();
-        let summary = find_row(&buf, 36, "Status & Signal Path").unwrap();
-        assert_eq!(meters, summary, "side by side at 160 columns");
+        let row = find(&app);
+        assert!(row.contains("← PCM 1") && !row.contains("MUTED"), "{row:?}");
+
+        app.model
+            .as_mut()
+            .unwrap()
+            .controls
+            .get_mut(&mute_id)
+            .unwrap()
+            .values = vec![1];
+        let row = find(&app);
+        assert!(row.contains("MUTED") && !row.contains("←"), "{row:?}");
+    }
+
+    #[test]
+    fn overview_keys_never_arm_or_write() {
+        let mut app = App::for_test(Some(model_4i4()));
+        for code in [' ', '0', 'm', 'x', '+', '-', '{', '}', 'h', 'l', 'H', 'L'] {
+            press(&mut app, KeyCode::Char(code));
+            assert!(app.armed.is_none() && app.status_msg.is_empty(), "{code}");
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(app.armed.is_none() && app.route_picker.is_none());
+    }
+
+    #[test]
+    fn wide_overview_uses_two_columns_only_when_one_overflows() {
+        let mut model = model_4i4();
+        model.meter_channels.clear();
+        for (i, group) in [RouteGroup::AnalogueOut, RouteGroup::MixerIn]
+            .into_iter()
+            .enumerate()
+        {
+            for j in 0..25 {
+                model.meter_channels.push(crate::model::MeterChannel {
+                    meter_index: i * 25 + j,
+                    label: format!("Ch {i}-{j:02}"),
+                    source: String::new(),
+                    group,
+                });
+            }
+        }
+        let mut app = App::for_test(Some(model));
+        app.meter_raw = vec![100; 50];
+        // 160 columns: both groups fit side by side, nothing hidden.
+        let wide = screen_text(&render_to_buffer(&app, 160, 36));
+        assert!(
+            wide.contains("Ch 0-24") && wide.contains("Ch 1-24"),
+            "{wide}"
+        );
+        assert!(!wide.contains(" more"), "{wide}");
+        let top = wide
+            .lines()
+            .find(|l| l.contains("Ch 0-00"))
+            .expect("first row");
+        assert!(top.contains("Ch 1-00"), "groups share a row: {top:?}");
+        // 95 columns: one column, and the overflow is counted.
+        let narrow = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(
+            narrow.contains("↓ ") && narrow.contains(" more"),
+            "{narrow}"
+        );
     }
 
     #[test]
@@ -3591,7 +3632,7 @@ mod tests {
         app.ingest_meters(vec![0, 0], now);
         assert!(app.clips.get(0), "latch holds after the level drops");
         let buf = render_to_buffer(&app, 95, 30);
-        assert!(row_text(&buf, 1).contains("CLIP"), "header badge");
+        assert!(row_text(&buf, 0).contains("CLIP"), "header badge");
         let screen: String = (0..30).map(|y| row_text(&buf, y)).collect();
         assert_eq!(screen.matches("CLIP").count(), 2, "header + one meter row");
 
@@ -3709,10 +3750,7 @@ mod tests {
             "{all}"
         );
         assert!(all.contains(" ▸"), "right overflow count shown");
-        assert!(
-            all.contains("−∞ (off)") && all.contains("mix not routed"),
-            "legend"
-        );
+        assert!(!all.contains("−∞ (off)"), "the legend is in the overlay");
         assert!(!all.contains("-∞"), "no ASCII -∞ in cells");
         // Only one real cell exists; absent cells stay blank (no em dash in the body).
         let body_row = screen.iter().find(|r| r.contains("In 01")).unwrap();
@@ -3736,7 +3774,7 @@ mod tests {
     #[test]
     fn tabs_name_device_routing_and_pipewire_graph() {
         let app = App::for_test(Some(model_4i4()));
-        let tabs = row_text(&render_to_buffer(&app, 95, 30), 3);
+        let tabs = row_text(&render_to_buffer(&app, 95, 30), 1);
         assert!(
             tabs.contains("3 Device routing") && tabs.contains("5 PipeWire graph"),
             "{tabs:?}"
@@ -3842,10 +3880,10 @@ mod tests {
         }
         app.tab = Tab::Overview;
         let buf = render_to_buffer(&app, 95, 30);
-        let row = row_text(&buf, 1);
+        let row = row_text(&buf, 0);
         let x = row[..row.find("48V").unwrap()].chars().count() as u16;
         assert!(
-            buf[(x, 1)].modifier.contains(Modifier::REVERSED),
+            buf[(x, 0)].modifier.contains(Modifier::REVERSED),
             "48V badge still reversed"
         );
     }
