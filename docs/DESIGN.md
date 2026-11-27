@@ -29,6 +29,21 @@ Kenny ruled on these on 27 November 2026. Change them only with a new ruling.
 | Design system | None. Rules live here; the canvas's tokens board is the drawing. |
 | Panel scope (default, unruled) | The panel covers monitoring and common controls. The mix matrix and full routing stay in the TUI. |
 
+Kenny ruled on these later on 27 November 2026, after the UX, simplicity and
+keys pass. Boards:
+[keys](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru#artboard-Proposed-Keys),
+[I/O board](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru#artboard-Proposed-IO-Board),
+[Overview](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru#artboard-Proposed-Overview-Meters),
+[panel](https://claude.ai/artifact/VJRtcSt5woExMGJ4kzsXru#artboard-Proposed-Panel-Merged).
+
+| Topic | Ruling |
+|---|---|
+| Level keys | `-` / `+` are ±1 dB and `{` / `}` are ±6 dB on every tab. `h` `j` `k` `l` and the arrows only move; they never change a value. `H` / `L` are gone. |
+| Mute and off | `m` is the only mute (an output on I/O, a cell on the Matrix). `x` is the only disconnect (route off, PipeWire link). `0` is only unity. Space and Enter no longer mute a matrix cell; `d` on the PipeWire tab is gone. |
+| 48V keys | Only Space arms and confirms 48V. Enter, `+` and `l` do neither. |
+| Overview | A read-only meters tab. The "Status & Signal Path" summary is gone. No key on this tab writes to the device. |
+| Panel layout | One block per channel: name, meter, level and its controls. No separate LEVELS section. `C` clears clip latches. |
+
 ## Six rules
 
 1. **Text is foreground.** Readable content uses `Color::Reset`. Secondary
@@ -114,12 +129,38 @@ within 2 s; the footer states the jump ("Press 0 again: +34 dB to 0.0 dB").
 Downward jumps are instant. This applies to input gain, output volume and
 matrix cells.
 
+`{` / `}` move 6 dB per press, so they never need the confirm. `m` on a muted
+matrix cell restores the level it had before, without a confirm, even when
+that is a rise of more than +6 dB ⚠ (left unguarded on purpose: the level was
+audible a moment earlier).
+
 ## Keymap
 
 One keymap table drives the event loop, the footer hints and the `?` overlay,
 so they cannot drift. The footer has two rows: transient status and selection
-context on row 1; the active tab's highest-value hints on row 2, ending in
-`? help`. Block titles hold names only, never hints.
+context on row 1; the active tab's hints on row 2, ending in `? help` and
+`q quit`. Tab, rescan and card keys are in the overlay only: the tab bar
+already shows the numbers. Block titles hold names only, never hints.
+
+**One vocabulary.** A key means one thing on every tab. The three families
+never overlap: move, change a level, switch a state. A key with no meaning on
+a tab does nothing there.
+
+| Key | Action | I/O | Device routing | Matrix | PipeWire graph |
+|---|---|---|---|---|---|
+| `h` `j` `k` `l`, arrows | Move. Never writes. | row, and control within a row | row | cell | row |
+| `-` / `+` | −/+ 1 dB, or previous / next choice | gain, volume, enum | previous / next source | cell | — |
+| `{` / `}` | −/+ 6 dB | gain, volume | — | cell | — |
+| `0` | Unity (confirm if > +6 dB) | gain, volume | — | cell | — |
+| `m` | Mute; again restores | the row's output | — | cell to −∞ | — |
+| `Space` | Toggle a switch | Air, Pad, mute, 48V (twice) | — | — | — |
+| `Enter` | Open or commit | same as Space, but never 48V | open the source picker | — | — |
+| `x` | Disconnect | — | route off | — | disconnect link (`Del` too) |
+| `a` | All links / Scarlett only | — | — | — | toggle |
+
+`=` is a silent alias for `+`, and `[` / `]` for `-` / `+`, so Shift makes
+the same key bigger. The Matrix also has `PgUp` / `PgDn` (page rows) and
+`Home` / `End` (first / last mix).
 
 **Everywhere**
 
@@ -136,54 +177,60 @@ context on row 1; the active tab's highest-value hints on row 2, ending in
 
 | Key | Action |
 |---|---|
-| `Space`, `Space` | Enable 48V (arm, then confirm within 3 s) |
-| `C` | Clear clip latches |
+| `Space`, `Space` | Enable 48V (arm, then confirm within 3 s). No other key arms or confirms. |
+| `0`, `0` | Unity when the rise is over +6 dB (confirm within 2 s) |
+| `C` | Clear clip latches (any tab, and the panel) |
 | `Esc` | Cancel an armed action; close an overlay |
 
-**I/O tab**
-
-| Key | Action |
-|---|---|
-| `j` / `k`, arrows | Move |
-| `h` / `l`, `-` / `+` | ±1 dB |
-| `H` / `L` | ±6 dB |
-| `0` | Unity (confirm if > +6 dB) |
-| `m` | Mute output |
-| `Space`, `Enter` | Toggle or expand |
-
-**Matrix tab**
-
-| Key | Action |
-|---|---|
-| `h` `j` `k` `l` | Move cell |
-| `+` / `-` | ±1 dB |
-| `{` / `}` | ±6 dB |
-| `0` | Unity (confirm if > +6 dB) |
-| `m` | Cell off (−∞) |
-| `PgUp` / `PgDn` | Page rows |
-| `Home` / `End` | First / last mix |
+Any other key also cancels an armed action, then acts normally.
 
 **Route picker**
 
 | Key | Action |
 |---|---|
+| `j` / `k` | Move |
 | `/` | Filter sources |
 | `Enter` | Set |
 | `Esc` | Cancel |
+
+**Panel**
+
+| Key | Action |
+|---|---|
+| Arrows | Move |
+| `Space` | Toggle a chip; 48V takes two |
+| `Enter` | Open an output's sources; set |
+| `m` | Mute the output under the cursor |
+| `C` | Clear clip latches |
+| `r` / `T` | Refresh / open the TUI |
+| `Esc` | Collapse, then close |
 
 ## Layout
 
 - **Tabs:** `1 Overview`, `2 I/O`, `3 Device routing`, `4 Matrix`,
   `5 PipeWire graph`. Tab 5's subtitle: "software links, not stored on the
   interface".
+- **Chrome:** one header line, one tab line and a rule, then the body, then a
+  rule and the two footer rows. The header has no box. At 95×30 that leaves 24
+  rows for the body.
 - **Header priority**, left to right, kept as width shrinks: sync `●` · sample
   rate · 48V badge · clip badge · model. USB ID and firmware drop out below
   120 columns and move to the help overlay's About block.
-- **Overview:** under 120 columns, meters stack full-width above the summary.
-  With 20+ channels, groups collapse to one line each with `↓ N more`.
+- **Overview:** meters only, in groups (outputs, inputs, mixer inputs). A row
+  ends with the state that explains its meter: `← source` for an output,
+  `MUTED`, `48V`, `CLIP`. With more channels than rows, the last line reads
+  `↓ N more`.
+- **I/O:** a board, not a table. Sections: Inputs, Phantom power, Outputs,
+  Device. One row per channel with its controls across; `h` / `l` step between
+  them. An output's mute sits on its volume row. 48V has its own section.
+  Read-only controls show `⊘`.
+- **Matrix:** the legend (`·` off, unity, boost, unrouted mix) is in the help
+  overlay, not on the tab.
 - **Panel:** 400 px wide. Model name on line one; status pills on line two
-  (`● Locked · 48 kHz · Gen 3`); firmware in the tooltip. One `TUI` button;
-  the footer is a status line.
+  (`● Locked · 48 kHz · Gen 3`); firmware in the tooltip. One `TUI` button.
+  Sections: INPUTS (meter, then chips, then the 48V row) and OUTPUTS (meter,
+  level, `MUTE`, then source). The alert strip is for clips only. The footer
+  is the key line.
 
 ## Colour-free modes
 
