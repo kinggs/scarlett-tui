@@ -128,11 +128,16 @@ Panel {
     return db.toFixed(0) + " dB"
   }
 
+  // Caution tone for the −9 to −1 dBFS zone. Commons.Color has no warning role,
+  // so blend accent halfway toward urgent; it follows whichever theme is active.
+  readonly property color cautionColor: Qt.tint(Commons.Color.accent, Util.alpha(Commons.Color.urgent, 0.5))
+
+  // Zones match docs/DESIGN.md "Meter zones" and the TUI.
   function meterColor(idx) {
     if (idx < 0 || idx >= meterDbfs.length) return Commons.Color.accent
     var db = Number(meterDbfs[idx])
     if (db >= -1) return Commons.Color.urgent
-    if (db >= -9) return "#e0af68"
+    if (db >= -9) return root.cautionColor
     return Commons.Color.accent
   }
 
