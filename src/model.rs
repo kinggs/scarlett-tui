@@ -566,6 +566,54 @@ impl ScarlettModel {
     pub fn is_locked(&self) -> bool {
         self.sync_status.eq_ignore_ascii_case("Locked")
     }
+
+    /// True for a control that switches 48 V phantom power on inputs, not the
+    /// "Phantom Power Persistence" setting that only remembers it.
+    pub fn is_phantom_switch(&self, numid: u32) -> bool {
+        self.phantom_numids.contains(&numid)
+            && self
+                .controls
+                .get(&numid)
+                .is_some_and(|c| !c.name.contains("Persistence"))
+    }
+
+    /// True while any input has 48 V phantom power on.
+    pub fn phantom_live(&self) -> bool {
+        self.phantom_numids.iter().any(|&id| {
+            self.is_phantom_switch(id)
+                && self
+                    .controls
+                    .get(&id)
+                    .and_then(|c| c.opt_bool_val())
+                    .unwrap_or(false)
+        })
+    }
+}
+
+/// A unity (0 dB) jump larger than this needs a second key press (docs/DESIGN.md).
+pub const UNITY_CONFIRM_RISE_DB: f64 = 6.0;
+
+/// What pressing the unity key should do for a level at `current_db`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnityJump {
+    /// At, below or within +6 dB of unity: write immediately.
+    Instant,
+    /// Ask for a second press. `rise_db` is `None` when the level is silent
+    /// (−∞) or unreadable, so the size of the jump is unknown.
+    Confirm { rise_db: Option<f64> },
+}
+
+/// Decide whether jumping a level to 0 dB needs confirmation. `at_min` is true
+/// when the control sits at its minimum raw value, which the hardware treats as −∞.
+pub fn unity_jump(current_db: Option<f64>, at_min: bool) -> UnityJump {
+    if at_min {
+        return UnityJump::Confirm { rise_db: None };
+    }
+    match current_db {
+        None => UnityJump::Confirm { rise_db: None },
+        Some(db) if -db > UNITY_CONFIRM_RISE_DB => UnityJump::Confirm { rise_db: Some(-db) },
+        Some(_) => UnityJump::Instant,
+    }
 }
 
 fn is_scarlett2_port_ordered(generation: &str) -> bool {
@@ -981,6 +1029,58 @@ mod tests {
         assert_eq!(c.db_to_raw(-80.0), Some(0));
         assert_eq!(c.db_to_raw(12.0), Some(184));
         assert_eq!(c.db_to_raw(50.0), Some(184)); // clamped
+    }
+
+    #[test]
+    fn unity_jump_confirms_only_large_rises() {
+        assert_eq!(
+            unity_jump(Some(-40.0), false),
+            UnityJump::Confirm {
+                rise_db: Some(40.0)
+            }
+        );
+        assert_eq!(
+            unity_jump(Some(-6.5), false),
+            UnityJump::Confirm { rise_db: Some(6.5) }
+        );
+        assert_eq!(unity_jump(Some(-6.0), false), UnityJump::Instant);
+        assert_eq!(unity_jump(Some(-1.0), false), UnityJump::Instant);
+        // Downward jumps (gain above unity) are always instant.
+        assert_eq!(unity_jump(Some(12.0), false), UnityJump::Instant);
+        // Silent (minimum = −∞) or unreadable levels always confirm.
+        assert_eq!(
+            unity_jump(Some(-3.0), true),
+            UnityJump::Confirm { rise_db: None }
+        );
+        assert_eq!(
+            unity_jump(None, false),
+            UnityJump::Confirm { rise_db: None }
+        );
+    }
+
+    #[test]
+    fn phantom_live_ignores_persistence_setting() {
+        let mut model = super::fixtures::model_4i4();
+        assert!(model.is_phantom_switch(20));
+        assert!(!model.phantom_live());
+
+        // Persistence on, 48V off: not live, and not a phantom switch.
+        model.controls.insert(
+            21,
+            mk_ctrl(
+                21,
+                "Phantom Power Persistence Capture Switch",
+                ControlKind::Bool,
+                &[],
+                1,
+            ),
+        );
+        model.phantom_numids.push(21);
+        assert!(!model.is_phantom_switch(21));
+        assert!(!model.phantom_live());
+
+        model.controls.get_mut(&20).unwrap().values = vec![1];
+        assert!(model.phantom_live());
     }
 
     #[test]
