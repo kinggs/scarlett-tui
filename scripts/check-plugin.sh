@@ -101,6 +101,15 @@ for m in re.finditer(r"\bduration\s*:\s*([^\n;\}]+)", qml):
 bare_color = re.findall(r"(?<!\.)\bColor\.(?:accent|urgent|foreground|background)\b", qml)
 assert not bare_color, f"Panel.qml must qualify Omarchy Color singleton as Commons.Color: {bare_color}"
 
+# Theme-following: no hex colour literals ("#rgb", "#rrggbb", "#aarrggbb") in code.
+# Colours come from Commons.Color roles and blends of them (docs/DESIGN.md rule 6).
+# Comments are stripped first; string interiors are matched on the raw source.
+qml_no_comments = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), raw_qml, flags=re.S)
+qml_no_comments = re.sub(r"//[^\n]*", "", qml_no_comments)
+for m in re.finditer(r"""["']#(?:[0-9A-Fa-f]{3}|[0-9A-Fa-f]{4}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})["']""", qml_no_comments):
+    line_no = qml_no_comments[: m.start()].count("\n") + 1
+    sys.exit(f"Panel.qml:{line_no}: hex colour literal {m.group(0)} breaks theme-following; derive it from Commons.Color")
+
 # No privilege escalation in plugin QML.
 for forbidden in ("sudo", "pkexec"):
     assert forbidden not in raw_qml, f"Panel.qml must not reference {forbidden}"
