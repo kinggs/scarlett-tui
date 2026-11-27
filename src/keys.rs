@@ -50,6 +50,7 @@ pub enum Action {
     ShowAll,
     Disconnect,
     ClearClips,
+    Filter,
 }
 
 /// One line of the help overlay, and optionally one footer hint.
@@ -267,6 +268,13 @@ pub const KEYMAP: &[Binding] = &[
         "set source",
         Some("set"),
         &[(K::Enter, A::Confirm), (K::Char(' '), A::Confirm)],
+    ),
+    b(
+        Scope::Picker,
+        "/",
+        "filter sources (Esc clears)",
+        Some("filter"),
+        &[(K::Char('/'), A::Filter)],
     ),
     b(
         Scope::Picker,
