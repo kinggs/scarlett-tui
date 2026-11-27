@@ -57,11 +57,11 @@ impl Tab {
 
     fn title(self) -> &'static str {
         match self {
-            Tab::Overview => "1 Overview & Meters",
-            Tab::IoDevice => "2 I/O & Device",
-            Tab::Routing => "3 Routing",
-            Tab::Matrix => "4 Mix Matrix",
-            Tab::PipeWire => "5 PipeWire Links",
+            Tab::Overview => "1 Overview",
+            Tab::IoDevice => "2 I/O",
+            Tab::Routing => "3 Device routing",
+            Tab::Matrix => "4 Matrix",
+            Tab::PipeWire => "5 PipeWire graph",
         }
     }
 }
@@ -78,7 +78,84 @@ struct RoutePicker {
     generation: u64,
     title: String,
     items: Vec<String>,
+    /// Item index under the cursor.
     selected: usize,
+    /// Item index the hardware is set to now (marked ●).
+    current: usize,
+    filter: String,
+    filtering: bool,
+}
+
+impl RoutePicker {
+    /// Item indices matching the filter, grouped by source type, then in device order.
+    fn visible(&self) -> Vec<usize> {
+        let needle = self.filter.to_lowercase();
+        let mut v: Vec<usize> = (0..self.items.len())
+            .filter(|&i| needle.is_empty() || self.items[i].to_lowercase().contains(&needle))
+            .collect();
+        v.sort_by_key(|&i| (source_group(&self.items[i]).0, i));
+        v
+    }
+
+    fn step(&mut self, delta: isize) {
+        let v = self.visible();
+        if v.is_empty() {
+            return;
+        }
+        let pos = v.iter().position(|&i| i == self.selected);
+        let next = match pos {
+            Some(p) => (p as isize + delta).clamp(0, v.len() as isize - 1) as usize,
+            None => 0,
+        };
+        self.selected = v[next];
+    }
+
+    /// Keep the cursor on a visible item after the filter changes.
+    fn snap(&mut self) {
+        let v = self.visible();
+        if !v.contains(&self.selected)
+            && let Some(&first) = v.first()
+        {
+            self.selected = first;
+        }
+    }
+}
+
+/// Source type of a routing source name: sort key and heading.
+fn source_group(name: &str) -> (u8, &'static str) {
+    if name.starts_with("Mix ") {
+        (0, "Mixes")
+    } else if name.starts_with("PCM ") {
+        (1, "From computer (PCM)")
+    } else if name.starts_with("Analogue") || name.starts_with("Line") {
+        (2, "Analogue")
+    } else if name.contains("S/PDIF") {
+        (3, "S/PDIF")
+    } else if name.starts_with("ADAT") {
+        (4, "ADAT")
+    } else if name == "Off" {
+        (6, "Off")
+    } else {
+        (5, "Other")
+    }
+}
+
+/// Fixed source colours (docs/DESIGN.md rule 5): cyan mix, green PCM, bold
+/// analogue and other, dim off. The words carry the type too.
+fn source_style(name: &str) -> Style {
+    if name == "Off" {
+        secondary()
+    } else if name.starts_with("Mix ") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if name.starts_with("PCM ") {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    }
 }
 
 /// A safety action waiting for its confirming key press (docs/DESIGN.md).
@@ -764,16 +841,47 @@ impl App {
 
         // Route picker modal intercepts keys
         if let Some(mut picker) = self.route_picker.take() {
+            // While filtering, typed characters edit the filter; Enter and the
+            // arrow keys still go through the keymap.
+            if picker.filtering {
+                match code {
+                    KeyCode::Char(c) => {
+                        picker.filter.push(c);
+                        picker.snap();
+                        self.route_picker = Some(picker);
+                        return;
+                    }
+                    KeyCode::Backspace => {
+                        picker.filter.pop();
+                        picker.snap();
+                        self.route_picker = Some(picker);
+                        return;
+                    }
+                    KeyCode::Esc => {
+                        picker.filtering = false;
+                        picker.filter.clear();
+                        self.route_picker = Some(picker);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
             match keys::lookup(Scope::Picker, code) {
                 Some(Action::Cancel) => {}
+                Some(Action::Filter) => {
+                    picker.filtering = true;
+                    self.route_picker = Some(picker);
+                }
                 Some(Action::Up) => {
-                    picker.selected = picker.selected.saturating_sub(1);
+                    picker.step(-1);
                     self.route_picker = Some(picker);
                 }
                 Some(Action::Down) => {
-                    if picker.selected + 1 < picker.items.len() {
-                        picker.selected += 1;
-                    }
+                    picker.step(1);
+                    self.route_picker = Some(picker);
+                }
+                Some(Action::Confirm) if !picker.visible().contains(&picker.selected) => {
+                    self.set_status("No source matches the filter");
                     self.route_picker = Some(picker);
                 }
                 Some(Action::Confirm) => {
@@ -1080,6 +1188,9 @@ impl App {
                     title,
                     items: ctrl.items.clone(),
                     selected: ctrl.val().max(0) as usize,
+                    current: ctrl.val().max(0) as usize,
+                    filter: String::new(),
+                    filtering: false,
                 });
             }
             Action::Right => {
@@ -1363,7 +1474,7 @@ impl App {
             let pw = Span::styled(
                 format!("PW {pw_count} "),
                 if pw_count > 0 {
-                    Style::default()
+                    Style::default().fg(Color::Magenta)
                 } else {
                     secondary()
                 },
@@ -1676,9 +1787,9 @@ impl App {
         if !pw_scarlett.is_empty() {
             info_lines.push(Line::from(""));
             info_lines.push(Line::from(Span::styled(
-                format!(" Active PipeWire Links ({})", pw_scarlett.len()),
+                format!(" PipeWire graph links ({})", pw_scarlett.len()),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Magenta)
                     .add_modifier(Modifier::BOLD),
             )));
             for l in pw_scarlett.iter().take(6) {
@@ -1850,19 +1961,16 @@ impl App {
                 } else {
                     Style::default()
                 };
-                let src_style = if r.current == "Off" {
-                    secondary()
-                } else if r.current.starts_with("Mix ") {
-                    Style::default().fg(Color::Yellow)
-                } else if r.current.starts_with("PCM ") {
-                    Style::default().fg(Color::Green)
+                let src_style = source_style(&r.current);
+                let src_text = if r.current == "Off" {
+                    "· off".to_string()
                 } else {
-                    Style::default().fg(Color::Cyan)
+                    r.current.clone()
                 };
                 Row::new(vec![
                     Cell::from(r.group.title()).style(secondary()),
                     Cell::from(r.label.clone()),
-                    Cell::from(r.current.clone()).style(src_style.add_modifier(Modifier::BOLD)),
+                    Cell::from(src_text).style(src_style),
                     Cell::from(r.summary.clone()),
                 ])
                 .style(style)
@@ -1888,7 +1996,7 @@ impl App {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Hardware routing ")
+                .title(" Device routing ")
                 .border_style(decoration())
                 .title_style(title_style()),
         );
@@ -2065,9 +2173,9 @@ impl App {
     fn render_pipewire(&self, f: &mut Frame, area: Rect) {
         let links = self.visible_pw_links();
         let title = if self.pw_show_all {
-            " PipeWire links — all "
+            " PipeWire graph · all links · software, not stored on the interface "
         } else {
-            " PipeWire links — Scarlett "
+            " PipeWire graph · Scarlett links · software, not stored on the interface "
         };
 
         if links.is_empty() {
@@ -2102,20 +2210,22 @@ impl App {
                 let is_loopback = l.output_port.contains("alsa_input.")
                     && l.input_port.contains("alsa_output.")
                     && l.is_scarlett;
-                let tag = if is_loopback {
-                    "loopback"
+                // Software links are magenta, never the device-routing cyan (DESIGN.md rule 5).
+                let (tag, tag_style) = if is_loopback {
+                    (
+                        "⟲ loopback",
+                        Style::default()
+                            .fg(Color::Magenta)
+                            .add_modifier(Modifier::BOLD),
+                    )
                 } else if l.is_scarlett {
-                    "focusrite"
+                    ("device", Style::default().fg(Color::Magenta))
                 } else {
-                    "other"
+                    ("other", secondary())
                 };
                 Row::new(vec![
                     Cell::from(format!("#{}", l.id)).style(secondary()),
-                    Cell::from(tag).style(Style::default().fg(if is_loopback {
-                        Color::Yellow
-                    } else {
-                        Color::Cyan
-                    })),
+                    Cell::from(tag).style(tag_style),
                     Cell::from(pipewire::short_port(&l.output_port)),
                     Cell::from("→").style(secondary()),
                     Cell::from(pipewire::short_port(&l.input_port)),
@@ -2152,32 +2262,99 @@ impl App {
     }
 
     fn render_route_picker(&self, f: &mut Frame, area: Rect, picker: &RoutePicker) {
-        let popup_w = 38.min(area.width.saturating_sub(4));
-        let popup_h = (picker.items.len() as u16 + 4).min(area.height.saturating_sub(4));
-        let x = area.x + (area.width.saturating_sub(popup_w)) / 2;
-        let y = area.y + (area.height.saturating_sub(popup_h)) / 2;
-        let rect = Rect::new(x, y, popup_w, popup_h);
-
-        f.render_widget(Clear, rect);
-        let items: Vec<ListItem> = picker
-            .items
-            .iter()
-            .map(|s| ListItem::new(s.as_str()))
-            .collect();
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" Route: {} ", picker.title))
-                    .border_style(Style::default().fg(Color::Cyan)),
-            )
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD))
-            .highlight_symbol("▸ ");
-        let mut state = ListState::default();
-        if !picker.items.is_empty() {
-            state.select(Some(picker.selected.min(picker.items.len() - 1)));
+        let visible = picker.visible();
+        let mut rows: Vec<ListItem> = Vec::new();
+        let mut cursor_row = None;
+        let mut last_group = None;
+        for &i in &visible {
+            let name = &picker.items[i];
+            let (group, heading) = source_group(name);
+            if last_group != Some(group) {
+                rows.push(ListItem::new(Line::from(Span::styled(
+                    format!(" {heading}"),
+                    secondary(),
+                ))));
+                last_group = Some(group);
+            }
+            let current = i == picker.current;
+            let mut extra = String::new();
+            if let Some(mix) = name.strip_prefix("Mix ").and_then(|l| l.chars().next())
+                && let Some(ref m) = self.model
+            {
+                extra = match mix_output(m, mix) {
+                    Some(o) => format!("  → {o}"),
+                    None => "  unused".into(),
+                };
+            }
+            if current {
+                extra.push_str(" (current)");
+            }
+            rows.push(ListItem::new(Line::from(vec![
+                Span::raw(if current { " ● " } else { "   " }),
+                Span::styled(name.clone(), source_style(name)),
+                Span::styled(extra, secondary()),
+            ])));
+            if i == picker.selected {
+                cursor_row = Some(rows.len() - 1);
+            }
         }
-        f.render_stateful_widget(list, rect, &mut state);
+
+        let popup_w = 52.min(area.width.saturating_sub(4));
+        let popup_h = (rows.len() as u16 + 4).min(area.height.saturating_sub(4));
+        let rect = Rect::new(
+            area.x + area.width.saturating_sub(popup_w) / 2,
+            area.y + area.height.saturating_sub(popup_h) / 2,
+            popup_w,
+            popup_h,
+        );
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Source for {} ", picker.title))
+            .title_style(title_style().add_modifier(Modifier::BOLD))
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let parts = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ])
+            .split(inner);
+
+        let filter_line = if picker.filtering || !picker.filter.is_empty() {
+            Line::from(vec![
+                Span::styled(" / ", secondary()),
+                Span::styled(
+                    picker.filter.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(if picker.filtering { "▏" } else { "" }, Style::default()),
+            ])
+        } else {
+            Line::from(Span::styled(" / to filter", secondary()))
+        };
+        f.render_widget(Paragraph::new(filter_line), parts[0]);
+
+        let list = List::new(rows)
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD));
+        let mut state = ListState::default();
+        state.select(cursor_row);
+        f.render_stateful_widget(list, parts[1], &mut state);
+
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(
+                    " {} of {} match · Enter set · Esc cancel",
+                    visible.len(),
+                    picker.items.len()
+                ),
+                secondary(),
+            ))),
+            parts[2],
+        );
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
@@ -3174,6 +3351,85 @@ mod tests {
         let buf = render_to_buffer(&app, 95, 30);
         let all: String = (0..30).map(|y| row_text(&buf, y)).collect();
         assert!(all.contains("◂ "), "left overflow count shown");
+    }
+
+    fn screen_text(buf: &Buffer) -> String {
+        (0..buf.area.height)
+            .map(|y| row_text(buf, y))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn tabs_name_device_routing_and_pipewire_graph() {
+        let app = App::for_test(Some(model_4i4()));
+        let tabs = row_text(&render_to_buffer(&app, 95, 30), 3);
+        assert!(
+            tabs.contains("3 Device routing") && tabs.contains("5 PipeWire graph"),
+            "{tabs:?}"
+        );
+    }
+
+    #[test]
+    fn route_picker_marks_current_groups_and_filters() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Routing;
+        press(&mut app, KeyCode::Enter);
+        let picker = app.route_picker.as_ref().expect("picker opens");
+        let current = picker.current;
+        let screen = screen_text(&render_to_buffer(&app, 95, 30));
+        let cur_name = &picker.items[current];
+        assert!(screen.contains(&format!("● {cur_name}")), "{screen}");
+        assert!(screen.contains("Mixes") && screen.contains("From computer (PCM)"));
+        assert!(screen.contains("6 of 6 match"));
+
+        press(&mut app, KeyCode::Char('/'));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('c'));
+        let picker = app.route_picker.as_ref().unwrap();
+        assert_eq!(
+            picker.items[picker.selected], "PCM 1",
+            "cursor snaps to a match"
+        );
+        let screen = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(screen.contains("2 of 6 match"), "{screen}");
+        // j is typed into the filter, not used to move.
+        press(&mut app, KeyCode::Char('j'));
+        assert!(app.route_picker.as_ref().unwrap().visible().is_empty());
+        press(&mut app, KeyCode::Enter);
+        assert!(
+            app.route_picker.is_some(),
+            "Enter with no match keeps the picker"
+        );
+        press(&mut app, KeyCode::Backspace);
+        press(&mut app, KeyCode::Down);
+        let picker = app.route_picker.as_ref().unwrap();
+        assert_eq!(picker.items[picker.selected], "PCM 2");
+        // Esc clears the filter first, then closes.
+        press(&mut app, KeyCode::Esc);
+        assert!(app.route_picker.as_ref().unwrap().filter.is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.route_picker.is_none());
+    }
+
+    #[test]
+    fn pipewire_loopback_rows_are_magenta_with_a_glyph() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.pw_links = vec![PwLink {
+            id: 42,
+            output_port: "alsa_input.usb-Focusrite:capture_FL".into(),
+            input_port: "alsa_output.usb-Focusrite:playback_FL".into(),
+            is_scarlett: true,
+        }];
+        app.tab = Tab::PipeWire;
+        let buf = render_to_buffer(&app, 95, 30);
+        let y = (0..30)
+            .find(|&y| row_text(&buf, y).contains("⟲ loopback"))
+            .expect("loopback tag");
+        let row = row_text(&buf, y);
+        let x = row[..row.find('⟲').unwrap()].chars().count() as u16;
+        assert_eq!(buf[(x, y)].fg, Color::Magenta);
+        assert!(screen_text(&buf).contains("not stored on the interface"));
     }
 
     #[test]
