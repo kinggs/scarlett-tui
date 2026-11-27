@@ -1463,8 +1463,10 @@ impl App {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Length(2), // Tabs
+                // One header line and one tab line; the body's own border is
+                // the rule under them (docs/DESIGN.md "Layout: Chrome").
+                Constraint::Length(1), // Header
+                Constraint::Length(1), // Tabs
                 Constraint::Min(8),    // Body
                 Constraint::Length(2), // Footer / key hints
             ])
@@ -1562,7 +1564,7 @@ impl App {
                     secondary()
                 },
             );
-            fit_header(segs, pw, area.width.saturating_sub(2) as usize)
+            fit_header(segs, pw, area.width as usize)
         } else if let Some(req) = self.card_override {
             Line::from(Span::styled(
                 format!(" ✕ Focusrite card {req} not connected · r rescan"),
@@ -1575,14 +1577,7 @@ impl App {
             ))
         };
 
-        let header = Paragraph::new(line).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" scarlett-tui ")
-                .border_style(decoration())
-                .title_style(title_style()),
-        );
-        f.render_widget(header, area);
+        f.render_widget(Paragraph::new(line), area);
     }
 
     fn render_tabs(&self, f: &mut Frame, area: Rect) {
@@ -2107,7 +2102,7 @@ impl App {
             .constraints([
                 Constraint::Min(3),    // table (2 header rows + cells)
                 Constraint::Length(1), // ↓ N more
-                Constraint::Length(1), // legend
+                Constraint::Length(1), // N ▸ more mixes
             ])
             .split(inner);
 
@@ -2231,26 +2226,15 @@ impl App {
             );
         }
 
-        let mut legend = vec![
-            Span::styled(" ·", decoration()),
-            Span::styled(" −∞ (off)   ", secondary()),
-            Span::styled("0.0", Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled(" unity   ", secondary()),
-            Span::styled(
-                "+3.0",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" boost   ", secondary()),
-            Span::styled("— mix not routed to an output", secondary()),
-        ];
+        // The cell legend lives in the ? overlay; this row only counts the
+        // mixes hidden to the right.
         if hidden_right > 0 {
-            legend.push(Span::raw("   "));
-            legend.push(Span::styled(format!("{hidden_right} ▸"), cyan_bold));
-            legend.push(Span::styled(" more mixes", secondary()));
+            let more = vec![
+                Span::styled(format!(" {hidden_right} ▸"), cyan_bold),
+                Span::styled(" more mixes", secondary()),
+            ];
+            f.render_widget(Paragraph::new(Line::from(more)), parts[2]);
         }
-        f.render_widget(Paragraph::new(Line::from(legend)), parts[2]);
     }
 
     fn render_pipewire(&self, f: &mut Frame, area: Rect) {
@@ -2554,6 +2538,24 @@ impl App {
             )));
         } else {
             left.extend(own);
+        }
+        if scope == Scope::Matrix {
+            left.push(Line::from(""));
+            left.push(heading("Cells"));
+            left.push(Line::from(vec![
+                Span::styled(" ·", decoration()),
+                Span::raw(" −∞ (off)   "),
+                Span::styled("0.0", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" unity   "),
+                Span::styled(
+                    "+3.0",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" boost"),
+            ]));
+            left.push(Line::from(" —  mix not routed to an output"));
         }
         left.push(Line::from(""));
         left.push(heading("Safety"));
@@ -3121,7 +3123,7 @@ mod tests {
     fn header_shows_48v_badge_only_while_live() {
         let mut app = App::for_test(Some(model_4i4()));
         let buf = render_to_buffer(&app, 95, 30);
-        assert!(!row_text(&buf, 1).contains("48V"));
+        assert!(!row_text(&buf, 0).contains("48V"));
 
         app.model
             .as_mut()
@@ -3131,11 +3133,11 @@ mod tests {
             .unwrap()
             .values = vec![1];
         let buf = render_to_buffer(&app, 95, 30);
-        let row = row_text(&buf, 1);
+        let row = row_text(&buf, 0);
         let x = row[..row.find("48V").expect("header badge")]
             .chars()
             .count() as u16;
-        let cell = &buf[(x, 1)];
+        let cell = &buf[(x, 0)];
         assert_eq!(cell.fg, Color::Red);
         assert!(cell.modifier.contains(Modifier::REVERSED));
     }
@@ -3194,13 +3196,52 @@ mod tests {
         assert!(!app.show_help);
     }
 
+    /// docs/DESIGN.md "Layout: Chrome": the body gets 26 of 30 rows.
+    #[test]
+    fn chrome_is_one_header_line_and_one_tab_line() {
+        let app = App::for_test(Some(model_4i4()));
+        let buf = render_to_buffer(&app, 95, 30);
+        assert!(row_text(&buf, 0).contains("● Locked"), "header on row 0");
+        assert!(!row_text(&buf, 0).contains("scarlett-tui"), "no header box");
+        assert!(row_text(&buf, 1).contains("1 Overview"), "tabs on row 1");
+        assert!(row_text(&buf, 2).starts_with('┌'), "body starts on row 2");
+        assert!(row_text(&buf, 27).starts_with('└'), "body ends on row 27");
+    }
+
+    #[test]
+    fn footer_keeps_tab_keys_and_drops_global_noise() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        let hints = row_text(&render_to_buffer(&app, 95, 30), 29);
+        assert!(
+            hints.contains("unity") && hints.contains("quit"),
+            "{hints:?}"
+        );
+        assert!(
+            !hints.contains("tabs") && !hints.contains("rescan"),
+            "{hints:?}"
+        );
+        assert!(hints.trim_end().ends_with("? help"), "{hints:?}");
+    }
+
+    #[test]
+    fn matrix_legend_is_in_the_help_overlay() {
+        let mut app = App::for_test(Some(model_4i4()));
+        app.tab = Tab::Matrix;
+        let tab = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(!tab.contains("mix not routed"), "legend left the tab");
+        press(&mut app, KeyCode::Char('?'));
+        let help = screen_text(&render_to_buffer(&app, 95, 30));
+        assert!(help.contains("−∞ (off)") && help.contains("mix not routed"));
+    }
+
     #[test]
     fn block_titles_hold_names_only() {
         let mut app = App::for_test(Some(model_4i4()));
         for tab in Tab::ALL {
             app.tab = tab;
             let buf = render_to_buffer(&app, 95, 30);
-            let body = row_text(&buf, 5);
+            let body = row_text(&buf, 2);
             assert!(
                 !body.contains("·  ") && !body.contains("toggle"),
                 "{body:?}"
@@ -3245,7 +3286,7 @@ mod tests {
             .get_mut(&20)
             .unwrap()
             .values = vec![1];
-        let narrow = row_text(&render_to_buffer(&app, 95, 30), 1);
+        let narrow = row_text(&render_to_buffer(&app, 95, 30), 0);
         let (sync, rate, v48, model) = (
             narrow.find("● Locked").expect("sync"),
             narrow.find("Idle").expect("rate"),
@@ -3261,7 +3302,7 @@ mod tests {
                 .trim_end()
                 .ends_with("PW 0")
         );
-        let wide = row_text(&render_to_buffer(&app, 160, 36), 1);
+        let wide = row_text(&render_to_buffer(&app, 160, 36), 0);
         assert!(wide.contains("USB 1235:8212"), "{wide:?}");
     }
 
@@ -3301,7 +3342,7 @@ mod tests {
         app.ingest_meters(vec![0, 0], now);
         assert!(app.clips.get(0), "latch holds after the level drops");
         let buf = render_to_buffer(&app, 95, 30);
-        assert!(row_text(&buf, 1).contains("CLIP"), "header badge");
+        assert!(row_text(&buf, 0).contains("CLIP"), "header badge");
         let screen: String = (0..30).map(|y| row_text(&buf, y)).collect();
         assert_eq!(screen.matches("CLIP").count(), 2, "header + one meter row");
 
@@ -3419,10 +3460,7 @@ mod tests {
             "{all}"
         );
         assert!(all.contains(" ▸"), "right overflow count shown");
-        assert!(
-            all.contains("−∞ (off)") && all.contains("mix not routed"),
-            "legend"
-        );
+        assert!(!all.contains("−∞ (off)"), "the legend is in the overlay");
         assert!(!all.contains("-∞"), "no ASCII -∞ in cells");
         // Only one real cell exists; absent cells stay blank (no em dash in the body).
         let body_row = screen.iter().find(|r| r.contains("In 01")).unwrap();
@@ -3446,7 +3484,7 @@ mod tests {
     #[test]
     fn tabs_name_device_routing_and_pipewire_graph() {
         let app = App::for_test(Some(model_4i4()));
-        let tabs = row_text(&render_to_buffer(&app, 95, 30), 3);
+        let tabs = row_text(&render_to_buffer(&app, 95, 30), 1);
         assert!(
             tabs.contains("3 Device routing") && tabs.contains("5 PipeWire graph"),
             "{tabs:?}"
@@ -3552,10 +3590,10 @@ mod tests {
         }
         app.tab = Tab::Overview;
         let buf = render_to_buffer(&app, 95, 30);
-        let row = row_text(&buf, 1);
+        let row = row_text(&buf, 0);
         let x = row[..row.find("48V").unwrap()].chars().count() as u16;
         assert!(
-            buf[(x, 1)].modifier.contains(Modifier::REVERSED),
+            buf[(x, 0)].modifier.contains(Modifier::REVERSED),
             "48V badge still reversed"
         );
     }
