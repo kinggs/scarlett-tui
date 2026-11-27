@@ -6,7 +6,7 @@ APPDIR      := $(PREFIX)/share/applications
 PLUGIN_ID   := io.github.kinggs.scarlett-tui
 PLUGIN_DIR  := $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/omarchy/plugins/$(PLUGIN_ID)
 
-.PHONY: all build test lint fmt-check clippy check-toolchain check-plugin install install-plugin uninstall clean
+.PHONY: all build test lint fmt-check clippy check-toolchain check-plugin screenshots install install-plugin uninstall clean
 
 all: build
 
@@ -40,6 +40,13 @@ lint: check-toolchain fmt-check clippy check-plugin
 
 check-plugin:
 	@bash scripts/check-plugin.sh
+
+# Regenerate the README screenshots from the demo fixture (no hardware, no
+# device writes). `make test` fails when design/tui-*.svg are out of date.
+# The PNGs need rsvg-convert and the JetBrainsMono Nerd Font.
+screenshots: check-toolchain
+	UPDATE_SCREENSHOTS=1 cargo test --locked demo_screenshots_are_current
+	@bash scripts/render-screenshots.sh
 
 install: build
 	install -Dm755 target/release/scarlett-tui "$(BINDIR)/scarlett-tui"

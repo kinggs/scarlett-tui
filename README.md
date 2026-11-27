@@ -13,13 +13,13 @@ panel. No background daemon when unused, no Electron or GTK toolkit, no `sudo`,
 and no hardcoded ALSA `numid`s.
 
 <p align="center">
-  <img src="design/tui-overview.png" alt="Overview tab at 95×30: a one-line header with Locked, 48.0 kHz and the model; every meter on a dB scale, grouped, each row naming the source that feeds it" width="49%">
+  <img src="design/tui-overview.png" alt="Overview tab at 95×30: a one-line header with Locked, 48.0 kHz, red 48V and CLIP badges and the model; every meter on a dB scale with peak ticks, each row naming its source; two muted headphone outputs and one latched clip" width="49%">
   &nbsp;
-  <img src="design/tui-matrix.png" alt="Mix matrix tab: mixes A to F across, each naming the output it feeds; quiet dots for −∞; the cursor cell reversed" width="49%">
+  <img src="design/tui-matrix.png" alt="Mix matrix tab: mixes A to F across, each naming the output it feeds; quiet dots for −∞; a +3 dB boost in yellow; the cursor cell reversed" width="49%">
 </p>
 
 <p align="center">
-  <img src="design/tui-io.png" alt="I/O tab as a board: one row per channel with Line/Inst, Air and Pad across; 48V in its own section; each output's volume and mute on one row; device switches" width="49%">
+  <img src="design/tui-io.png" alt="I/O tab as a board: one row per channel with Line/Inst, Air and Pad across; 48V live in its own section; each output's volume and mute on one row; device switches" width="49%">
   &nbsp;
   <img src="design/tui-help.png" alt="The ? overlay: this tab's keys, safety keys, global keys and an About block with model, USB id, firmware and card" width="49%">
 </p>
@@ -27,12 +27,13 @@ and no hardcoded ALSA `numid`s.
 <p align="center"><em>The TUI at the 95×30 size of Omarchy's floating window, on a Scarlett 4i4 Gen 3:
 overview, mix matrix, I/O, and the <code>?</code> key overlay.</em></p>
 
-The screenshots come from the real TUI against a connected interface, painted
-in Omarchy's Tokyo Night palette (the TUI itself uses only the 16 ANSI colours,
-so it follows your theme). To regenerate them with a Scarlett attached:
-`cargo test --locked -- --ignored capture_readme_screenshots`, then
-`rsvg-convert -z 2` each `design/tui-*.svg` to PNG. ⚠ The bar plugin panel is
-not pictured yet.
+The screenshots are the real TUI drawing a demo state: a Scarlett 4i4 Gen 3
+fixture with the control names a real one has, set up to show 48V, a latched
+clip, muted headphones and a worked mix. They are not a capture of a session.
+They are painted in Omarchy's Tokyo Night palette (the TUI itself uses only the
+16 ANSI colours, so it follows your theme). `make screenshots` regenerates
+them without hardware, and `make test` fails when they fall behind the code.
+⚠ The bar plugin panel is not pictured yet.
 
 ## Why this exists
 

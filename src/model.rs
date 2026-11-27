@@ -1292,4 +1292,221 @@ pub(crate) mod fixtures {
         ];
         ScarlettModel::build(card, StreamRateInfo::default(), list)
     }
+
+    /// The README's demo: a whole Scarlett 4i4 Gen 3, with the control names
+    /// the kernel driver gives a real one, in a state chosen to show the UI
+    /// off (48V live, Inst and Air on, headphones muted, a worked mix). It is
+    /// not a capture: `make screenshots` renders it, so the pictures can be
+    /// regenerated without hardware and never write to a device.
+    pub(crate) fn model_demo() -> ScarlettModel {
+        let card = CardEntry {
+            index: 1,
+            alsa_id: "USB".into(),
+            name: "Scarlett 4i4 USB".into(),
+            usb_id: "1235:8212".into(),
+            generation: "Gen 3".into(),
+        };
+        let sources = &[
+            "Off",
+            "Analogue 1",
+            "Analogue 2",
+            "Analogue 3",
+            "Analogue 4",
+            "Mix A",
+            "Mix B",
+            "Mix C",
+            "Mix D",
+            "Mix E",
+            "Mix F",
+            "PCM 1",
+            "PCM 2",
+            "PCM 3",
+            "PCM 4",
+        ];
+        let src = |name: &str| sources.iter().position(|s| *s == name).unwrap() as i64;
+        let mut list = vec![mk_ctrl(4, "Firmware Version", ControlKind::Int, &[], 1605)];
+
+        // Outputs: monitors at unity, headphones at −12 dB and muted.
+        for (i, (label, raw, muted)) in [
+            ("Line 01 (Monitor L)", 127, 0),
+            ("Line 02 (Monitor R)", 127, 0),
+            ("Line 03 (Headphones L)", 115, 1),
+            ("Line 04 (Headphones R)", 115, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let n = i as u32;
+            let mut vol = mk_ctrl(
+                6 + 2 * n,
+                &format!("{label} Playback Volume"),
+                ControlKind::Int,
+                &[],
+                raw,
+            );
+            vol.max = 127;
+            vol.db_min = Some(-127.0);
+            vol.db_max = Some(0.0);
+            list.push(vol);
+            list.push(mk_ctrl(
+                7 + 2 * n,
+                &format!("Line {:02} Mute Playback Switch", n + 1),
+                ControlKind::Bool,
+                &[],
+                muted,
+            ));
+        }
+
+        // Inputs: 1 is an instrument with Air; 2 is a padded line source.
+        for (n, level, air, pad) in [(1u32, 1, 1, 0), (2, 0, 0, 1)] {
+            list.push(mk_ctrl(
+                13 + n,
+                &format!("Line In {n} Level Capture Enum"),
+                ControlKind::Enum,
+                &["Line", "Inst"],
+                level,
+            ));
+            list.push(mk_ctrl(
+                17 + n,
+                &format!("Line In {n} Air Capture Switch"),
+                ControlKind::Bool,
+                &[],
+                air,
+            ));
+            list.push(mk_ctrl(
+                15 + n,
+                &format!("Line In {n} Pad Capture Switch"),
+                ControlKind::Bool,
+                &[],
+                pad,
+            ));
+        }
+        list.push(mk_ctrl(
+            20,
+            "Line In 1-2 Phantom Power Capture Switch",
+            ControlKind::Bool,
+            &[],
+            1,
+        ));
+        list.push(mk_ctrl(
+            21,
+            "Phantom Power Persistence Capture Switch",
+            ControlKind::Bool,
+            &[],
+            1,
+        ));
+
+        // Routing: monitors hear mix A/B, headphones hear the cue mix C/D.
+        for (i, from) in ["Mix A", "Mix B", "Mix C", "Mix D"].into_iter().enumerate() {
+            list.push(mk_ctrl(
+                22 + i as u32,
+                &format!("Analogue Output {:02} Playback Enum", i + 1),
+                ControlKind::Enum,
+                sources,
+                src(from),
+            ));
+        }
+        let mixer_in = [
+            "Analogue 1",
+            "Analogue 2",
+            "PCM 1",
+            "PCM 2",
+            "PCM 3",
+            "PCM 4",
+            "Off",
+            "Off",
+        ];
+        for (i, from) in mixer_in.into_iter().enumerate() {
+            list.push(mk_ctrl(
+                26 + i as u32,
+                &format!("Mixer Input {:02} Capture Enum", i + 1),
+                ControlKind::Enum,
+                sources,
+                src(from),
+            ));
+        }
+        let capture = ["Analogue 1", "Analogue 2", "Mix A", "Mix B", "Off", "Off"];
+        for (i, from) in capture.into_iter().enumerate() {
+            list.push(mk_ctrl(
+                34 + i as u32,
+                &format!("PCM {:02} Capture Enum", i + 1),
+                ControlKind::Enum,
+                sources,
+                src(from),
+            ));
+        }
+
+        // The mix matrix, in dB per mixer input (None is −∞). A and B are a
+        // stereo monitor mix; C and D boost the instrument for a cue mix.
+        let off = None;
+        let matrix: [(char, [Option<f64>; 8]); 6] = [
+            (
+                'A',
+                [
+                    Some(0.0),
+                    Some(-6.0),
+                    Some(-10.0),
+                    off,
+                    Some(-12.0),
+                    off,
+                    off,
+                    off,
+                ],
+            ),
+            (
+                'B',
+                [
+                    Some(0.0),
+                    Some(-6.0),
+                    off,
+                    Some(-10.0),
+                    off,
+                    Some(-12.0),
+                    off,
+                    off,
+                ],
+            ),
+            ('C', [Some(3.0), off, Some(-20.0), off, off, off, off, off]),
+            ('D', [Some(3.0), off, off, Some(-20.0), off, off, off, off]),
+            ('E', [off; 8]),
+            ('F', [off; 8]),
+        ];
+        for (m, (mix, levels)) in matrix.into_iter().enumerate() {
+            for (i, db) in levels.into_iter().enumerate() {
+                let mut cell = mk_ctrl(
+                    40 + (m * 8 + i) as u32,
+                    &format!("Mix {mix} Input {:02} Playback Volume", i + 1),
+                    ControlKind::Int,
+                    &[],
+                    0,
+                );
+                if let Some(db) = db {
+                    cell.values = vec![cell.db_to_raw(db).unwrap()];
+                }
+                list.push(cell);
+            }
+        }
+
+        list.push(mk_ctrl(
+            89,
+            "Sync Status",
+            ControlKind::Enum,
+            &["Unlocked", "Locked"],
+            1,
+        ));
+        list.push(mk_ctrl(90, "Standalone Switch", ControlKind::Bool, &[], 1));
+        // One meter per route: 4 outputs, 8 mixer inputs, 6 capture channels.
+        let mut meter = mk_ctrl(88, "Level Meter", ControlKind::Int, &[], 0);
+        meter.count = 18;
+        meter.max = 4095;
+        meter.values = vec![0; 18];
+        meter.rw = false;
+        list.push(meter);
+
+        let stream = StreamRateInfo {
+            active_rate: Some(48_000),
+            ..StreamRateInfo::default()
+        };
+        ScarlettModel::build(card, stream, list)
+    }
 }
