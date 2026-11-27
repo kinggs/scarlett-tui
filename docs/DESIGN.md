@@ -210,9 +210,9 @@ Any other key also cancels an armed action, then acts normally.
 - **Tabs:** `1 Overview`, `2 I/O`, `3 Device routing`, `4 Matrix`,
   `5 PipeWire graph`. Tab 5's subtitle: "software links, not stored on the
   interface".
-- **Chrome:** one header line, one tab line and a rule, then the body, then a
-  rule and the two footer rows. The header has no box. At 95×30 that leaves 24
-  rows for the body.
+- **Chrome:** one header line, one tab line, the body, then the two footer
+  rows. The header has no box; the body's own border is the rule. At 95×30
+  that leaves 26 rows for the body.
 - **Header priority**, left to right, kept as width shrinks: sync `●` · sample
   rate · 48V badge · clip badge · model. USB ID and firmware drop out below
   120 columns and move to the help overlay's About block.
